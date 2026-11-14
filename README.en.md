@@ -4,7 +4,7 @@
 
 A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh2, mbedTLS, libvterm, and SQLite.
 
-> **Project status: 0.2.0-dev.** This is a Linux x86_64 desktop development prototype, not a v1.0 release. Windows x86_64 cross-compilation works, but native runtime validation is still pending. Features, data formats, and command-line options may change.
+> **Project status: 1.0.0 stable.** Both Linux x86_64 and Windows x86_64 have been validated on real hardware. On Windows the credential vault, SSH Agent, local chmod, and system-theme detection remain unavailable or limited; see Platform support and Security model below. Features and data formats are stable for this release and may continue to evolve.
 
 ## Features
 
@@ -46,6 +46,7 @@ A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh
 - Quick connect has a “Save to workspace devices” checkbox; leaving it unchecked creates no device. Remembering secrets requires a saved device.
 - A random local key and XChaCha20-Poly1305 protect records. The directory is `0700`; key, data and lock files are `0600`. An exclusive lock prevents concurrent writes.
 - Old master-password vaults are not migrated or deleted. Re-enter secrets and select the new policy.
+- Windows has no credential-backend implementation, so none of the secret-memory policies work there. Re-enter passwords on every connection; passwords and key passphrases are never written to disk.
 
 ### Interface
 
@@ -57,8 +58,8 @@ A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh
 
 | Target | Build | Runtime validation | Notes |
 | --- | --- | --- | --- |
-| Linux x86_64 | ✅ | ✅ Development prototype | Primary target; requires glibc ≥ 2.35 and X11/Wayland + OpenGL3 |
-| Windows x86_64 | ✅ Cross-compiled | ❌ Not yet validated natively | GUI subsystem, single EXE; vault, SSH Agent, chmod, and system-theme detection are limited |
+| Linux x86_64 | ✅ | ✅ Validated on hardware | Primary target; requires glibc ≥ 2.35 and X11/Wayland + OpenGL3 |
+| Windows x86_64 | ✅ | ✅ Validated on hardware | GUI subsystem, single EXE; vault, SSH Agent, chmod, and system-theme detection are unavailable or limited |
 
 The Windows target uses prebuilt static archives from the dependency root and never downloads dependencies implicitly; a missing archive fails the build with a clear error. Apart from the UCRT and system DLLs, it does not require `SDL2.dll`.
 
@@ -91,8 +92,8 @@ Both scripts verify source SHA256 checksums and build only inside the dedicated 
 ./zig-out/bin/JianSSH
 
 ./build.sh run                   # Build and run
-./build.sh dist-linux-x86_64     # Stripped development prototype → zig-out/dist/JianSSH-linux-x86_64
-./build.sh windows               # Windows x86_64 GUI prototype → zig-out/bin/JianSSH.exe
+./build.sh dist-linux-x86_64     # Stripped release build → zig-out/dist/JianSSH-linux-x86_64
+./build.sh windows               # Windows x86_64 GUI release → zig-out/bin/JianSSH.exe
 ```
 
 The final link uses explicit static archives only. At runtime the application still depends on the system glibc, X11/Wayland, and OpenGL drivers. Fonts and icons are embedded at build time, so no sidecar resources are needed at runtime.
@@ -180,12 +181,12 @@ Saving serial devices upgrades the database schema to version 3 while preserving
 
 ## Security model and boundaries
 
-- Encrypted credentials use a Linux local key. Anyone holding both ciphertext and key can decrypt them; this does not replace account or disk security. Windows DPAPI, rollback detection and `mlock` are not provided. An attacker controlling the current user can access secrets.
+- Encrypted credentials use a Linux local key. Anyone holding both ciphertext and key can decrypt them; this does not replace account or disk security. Rollback detection and `mlock` are not provided, so an attacker controlling the current user can access secrets. Windows has no DPAPI (or equivalent) backend, so credentials are never persisted there.
 - Host keys are stored only in the application database. Importing OpenSSH hashed `known_hosts` and a key-replacement UI are not supported.
 - Select visible terminal text by dragging and use the right-click menu to copy or paste. Ctrl+Shift+C copies, and Ctrl+Shift+V or Shift+Insert pastes (confirmation required). Ctrl+C still sends an interrupt. Search, full scrollback browsing, and comprehensive compatibility regression are still missing; vim, tmux, and IME behavior require continued validation.
-- SFTP v1.0 capabilities (concurrency, pause, resume, recursive directories, and so on) are not implemented.
+- Advanced SFTP capabilities (concurrency, pause, resume, recursive directories, and so on) are not implemented and are planned for a future release.
 - Remote monitoring supports Linux targets only. macOS/Windows targets, multi-hop bastions, proxies, and port forwarding are not implemented.
-- Windows artifacts have not been validated by a native launch on Windows; the vault, SSH Agent, local chmod, and system-theme detection are limited on that target.
+- Windows artifacts have been validated on real hardware. The vault, SSH Agent, and local chmod are unavailable on that target, and system-theme detection is unavailable (System mode falls back to dark).
 - There is no auto-update, telemetry, or cloud sync. All host profiles and credentials stay on the local machine.
 
 ## Contributing
@@ -221,7 +222,7 @@ If you cite this project in a paper, report, or derivative work:
   title        = {JianSSH: A Lightweight SSH Desktop Client},
   author       = {{JianSSH contributors}},
   year         = {2026},
-  version      = {0.2.0-dev},
+  version      = {1.0.0},
   note         = {C++20, Zig, Dear ImGui, SDL2, libssh2, libvterm, SQLite}
 }
 ```

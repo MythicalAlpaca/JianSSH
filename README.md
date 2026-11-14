@@ -4,7 +4,7 @@
 
 基于 C++20、Zig、Dear ImGui、SDL2、libssh2、mbedTLS、libvterm 与 SQLite 的轻量级 SSH 桌面客户端。
 
-> **项目状态：0.2.0-dev。** 当前是 Linux x86_64 桌面开发原型，不是 v1.0 正式版本；Windows x86_64 可以交叉编译，但尚未完成原生运行验收。功能范围、数据格式和命令参数仍可能变化。
+> **项目状态：1.0.0 正式版。** Linux x86_64 与 Windows x86_64 均已通过实机运行验证。Windows 上凭据库、SSH Agent、本地 chmod 和系统主题探测仍不可用或受限，详见下文平台支持与安全模型。功能范围与数据格式以本版本为准，后续版本可能继续调整。
 
 ## 功能特性
 
@@ -46,6 +46,7 @@
 - 快速连接可勾选“保存到工作空间设备”；不勾选则不新增设备，记忆口令需关联已保存设备。
 - 使用随机本机密钥和 XChaCha20-Poly1305 加密记录，目录权限 `0700`，密钥、数据和锁文件为 `0600`，独占锁避免多实例并发写入。
 - 旧主密码库不会自动迁移或删除，请重新输入连接口令并选择新的记忆策略。
+- Windows 目前没有凭据库后端，口令记忆策略均不可用，每次连接需重新输入口令；密码和私钥口令不会写入磁盘。
 
 ### 界面
 
@@ -57,8 +58,8 @@
 
 | 目标 | 构建 | 运行验证 | 说明 |
 | --- | --- | --- | --- |
-| Linux x86_64 | ✅ | ✅ 开发原型 | 当前主力目标，要求 glibc ≥ 2.35；图形栈为 X11/Wayland + OpenGL3 |
-| Windows x86_64 | ✅ 交叉编译 | ❌ 尚未原生启动验证 | GUI 子系统，单 EXE；凭据库、SSH Agent、chmod 和系统主题探测受限 |
+| Linux x86_64 | ✅ | ✅ 实机验证 | 主力目标，要求 glibc ≥ 2.35；图形栈为 X11/Wayland + OpenGL3 |
+| Windows x86_64 | ✅ | ✅ 实机验证 | GUI 子系统，单 EXE；凭据库、SSH Agent、chmod 和系统主题探测不可用或受限 |
 
 Windows 目标使用依赖根下预编译好的静态归档，不会自动下载依赖；缺少归档时构建会明确报错。除 UCRT/系统 DLL 外不额外依赖 `SDL2.dll`。
 
@@ -91,8 +92,8 @@ export JIANSSH_DEPS_ROOT=/path/to/JianSSH-deps
 ./zig-out/bin/JianSSH
 
 ./build.sh run                   # 构建后直接运行
-./build.sh dist-linux-x86_64     # 剥离符号的开发原型 → zig-out/dist/JianSSH-linux-x86_64
-./build.sh windows               # Windows x86_64 GUI 原型 → zig-out/bin/JianSSH.exe
+./build.sh dist-linux-x86_64     # 剥离符号的发布版 → zig-out/dist/JianSSH-linux-x86_64
+./build.sh windows               # Windows x86_64 GUI 发布版 → zig-out/bin/JianSSH.exe
 ```
 
 最终链接只使用显式静态归档；运行期仍依赖系统的 glibc、X11/Wayland 与 OpenGL 驱动。字体和图标在构建时嵌入二进制，运行时不需要旁置资源文件。
@@ -180,12 +181,12 @@ JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件]
 
 ## 安全模型与边界
 
-- 加密口令采用 Linux 本机密钥模式；复制密文和密钥即可解密，不替代系统账户及磁盘安全。不提供 Windows DPAPI、整库回滚检测或 `mlock`，无法对已控制当前用户的攻击者保密。
+- 加密口令采用 Linux 本机密钥模式；复制密文和密钥即可解密，不替代系统账户及磁盘安全。不提供整库回滚检测或 `mlock`，无法对已控制当前用户的攻击者保密。Windows 未实现 DPAPI 或等价的系统凭据后端，口令不会持久化。
 - 主机密钥只保存在应用数据库；不支持导入 OpenSSH hashed `known_hosts`，也暂不提供密钥替换 UI。
 - 终端支持鼠标拖动选择可见屏幕内容，右键菜单可复制或粘贴；也可使用 Ctrl+Shift+C 复制、Ctrl+Shift+V 或 Shift+Insert 粘贴（粘贴需确认）；Ctrl+C 仍发送中断。搜索、完整滚动浏览和全部兼容性回归尚未完成；vim、tmux 与 IME 仍待持续验证。
-- SFTP 的 v1.0 能力（并发、暂停、续传、目录递归等）尚未完成。
+- SFTP 的高级能力（并发、暂停、续传、目录递归等）尚未实现，将在后续版本评估。
 - 远端监控仅支持 Linux 远端；macOS/Windows 远端、多级跳板、代理和端口转发尚未实现。
-- Windows 产物未在 Windows 上原生启动验证；凭据库、SSH Agent、本地 chmod 和系统主题探测在该目标受限。
+- Windows 已通过实机运行验证；凭据库、SSH Agent、本地 chmod 在该目标不可用，系统主题探测不可用（系统主题模式回退为深色）。
 - 项目没有自动更新、遥测或云同步；所有设备资料与凭据均保存在本机。
 
 ## 参与开发
@@ -221,7 +222,7 @@ JianSSH 以 [MIT License](LICENSE) 发布，Copyright (c) 2026 JianSSH contribut
   title        = {JianSSH: A Lightweight SSH Desktop Client},
   author       = {{JianSSH contributors}},
   year         = {2026},
-  version      = {0.2.0-dev},
+  version      = {1.0.0},
   note         = {C++20, Zig, Dear ImGui, SDL2, libssh2, libvterm, SQLite}
 }
 ```

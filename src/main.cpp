@@ -54,9 +54,9 @@ int run_application(int argc,char**argv){
     for(int i=1;i<argc;++i){std::string a=argv[i];
     if(a=="--version"){std::puts(
 #ifdef _WIN32
-     "JianSSH 0.2.0-dev（Windows 桌面版）"
+     "JianSSH 1.0.0（Windows 桌面版）"
 #else
-     "JianSSH 0.2.0-dev（Linux 桌面版）"
+     "JianSSH 1.0.0（Linux 桌面版）"
 #endif
     );return 0;}
     if(a=="--help"){std::puts("JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件] [--data-dir 目录] [--reduced-motion] [--theme system|dark|light] [--window 宽x高]");return 0;}

@@ -1,9 +1,26 @@
+# Build output and caches
 /build/
 /zig-out/
 /.zig-cache/
+__pycache__/
+*.py[cod]
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# Local data, credentials and test artifacts
 *.db
 *.db-wal
 *.db-shm
+*.bmp
+*.log
+*.tmp
 credentials.vault
 credentials.vault.*
 credentials.enc

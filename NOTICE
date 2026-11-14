@@ -1,10 +1,9 @@
-JianSSH 0.2.0-dev — third-party notices
+JianSSH 1.0.0 — third-party notices
 
 JianSSH itself is licensed under the MIT License. See LICENSE.
 
-This development prototype includes or links the following third-party
-components. Their licenses apply to those components, not to the whole of
-JianSSH:
+This release includes or links the following third-party components. Their
+licenses apply to those components, not to the whole of JianSSH:
 
 - libssh2 1.11.1 — BSD-3-Clause, see third_party/licenses/libssh2.txt.
 - mbedTLS 3.6.4 — Apache-2.0, see third_party/licenses/mbedTLS.txt.
@@ -21,10 +20,10 @@ JianSSH:
 - Droid Sans Fallback — Apache-2.0, see assets/fonts/Droid-COPYRIGHT.
 
 The complete license texts above are part of the source tree. Runtime system
-X11/Wayland/OpenGL libraries are not redistributed by this prototype.
+X11/Wayland/OpenGL libraries are not redistributed with this release.
 
 If you redistribute JianSSH binaries or a substantially modified source tree,
 keep LICENSE, this NOTICE, and the referenced third-party license texts with
-the distribution. This file is an initial inventory, not a completed release
-compliance sign-off: review bundled subcomponents, generated protocol headers
-and source metadata before shipping.
+the distribution. This file records the third-party inventory; review bundled
+subcomponents, generated protocol headers and source metadata before shipping
+modified builds.

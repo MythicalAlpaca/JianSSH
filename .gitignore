@@ -1,0 +1,10 @@
+/build/
+/zig-out/
+/.zig-cache/
+*.db
+*.db-wal
+*.db-shm
+credentials.vault
+credentials.vault.*
+credentials.enc
+credentials.enc.*

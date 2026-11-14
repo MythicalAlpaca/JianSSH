@@ -1,0 +1,229 @@
+# JianSSH
+
+**简体中文** | [English](README.en.md)
+
+基于 C++20、Zig、Dear ImGui、SDL2、libssh2、mbedTLS、libvterm 与 SQLite 的轻量级 SSH 桌面客户端。
+
+> **项目状态：0.2.0-dev。** 当前是 Linux x86_64 桌面开发原型，不是 v1.0 正式版本；Windows x86_64 可以交叉编译，但尚未完成原生运行验收。功能范围、数据格式和命令参数仍可能变化。
+
+## 功能特性
+
+### 设备与会话
+
+- 设备新增、编辑、删除、分组和搜索；设备资料存入 SQLite（WAL 模式），不包含密码字段。
+- 快速连接与多会话标签页；连接方式可选 SSH 或 Windows/Linux 串口。串口可刷新列表或手动输入设备路径，默认 115200 8N1、无流控；新增设备可保存串口配置，快速连接不会自动保存。
+- 串口会话复用终端，不提供 SSH 文件传输、远端监控、认证和主机密钥验证。断开时未发送数据会被丢弃并提示。
+- 打开串口可能改变 DTR/RTS，部分设备可能复位；Linux 用户需自行确认设备访问权限（通常由 `dialout` 组或设备 ACL 控制）。不自动修改权限，不自动发送登录命令。
+- 支持密码、公钥（私钥旁可放置同名 `.pub`）和 SSH Agent（Linux）认证。私钥通过文件选择器选取，选择及提交时检查文件可读性和格式；Linux 文件选择器依赖 `zenity`。旧版 keyboard-interactive 设备须编辑并保存其他认证方式后才能连接。
+- 私钥格式检查仅为初筛，不验证私钥口令或保证算法可用于连接；具体格式和口令由 SSH 认证时验证。
+- 首次连接展示 SHA256 主机密钥指纹并要求确认；信任记录成功写入后才继续认证；已知密钥不匹配时直接拒绝连接。
+- 主机密钥按应用内部“原始公钥 + 主机/端口”保存，不读取或改写 OpenSSH 的 `known_hosts`。
+
+### 终端
+
+- 后台单 owner 非阻塞 SSH IO，支持交互 PTY、窗口尺寸变化和有界输出背压。
+- 基于 libvterm 的终端渲染，回滚上限 2000 行。
+- 输入、粘贴与 PTY resize 不阻塞界面线程；粘贴先预览确认并限制大小。
+- 不自动重连、不重放历史输入；断线后由用户显式重新连接。
+
+### 文件传输
+
+- SFTP 双栏浏览，可点击上级目录，支持本地栏与远端栏之间拖拽传输。
+- 普通文件上传、下载、取消，以及 mkdir、重命名、删除、chmod。
+- 默认不覆盖目标文件；不提供递归传输/删除、断点续传或并发传输。
+- 传输临时文件使用 `0600` 权限，失败时不会通过删除目标文件来“回退”。
+
+### 远端监控
+
+- 连接成功后自动开启远端 Linux 采样：通过 SSH exec 读取 `/proc`、`df` 等数据。
+- CPU、内存、磁盘和网络的最新值显示在底部资源条，不展示模拟数据。
+- 采样失败按退避间隔重试；断线或停止监控后只保留历史数据并标注过期。
+
+### 连接口令存储
+
+- 记忆策略提供“从不记忆 / 仅本次运行 / 加密储存连接口令”，不再使用主密码库。
+- 选择记忆策略后，只在认证成功后保存密码或私钥口令，OTP 不保存；口令输入可切换明文/掩码显示。
+- 快速连接可勾选“保存到工作空间设备”；不勾选则不新增设备，记忆口令需关联已保存设备。
+- 使用随机本机密钥和 XChaCha20-Poly1305 加密记录，目录权限 `0700`，密钥、数据和锁文件为 `0600`，独占锁避免多实例并发写入。
+- 旧主密码库不会自动迁移或删除，请重新输入连接口令并选择新的记忆策略。
+
+### 界面
+
+- 内嵌中文与比例字体，macOS 风格的中性灰材质、系统蓝强调色与圆角控件；支持跟随系统、深色和浅色主题。
+- 入场、悬停、选中、模态与页面切换过渡带有限时长；页面切换采用快出慢入的分段缓动，省电模式默认开启，空闲时按需绘制。
+- 支持 `--reduced-motion` 和界面内的“减少动态效果”选项。
+
+## 平台支持
+
+| 目标 | 构建 | 运行验证 | 说明 |
+| --- | --- | --- | --- |
+| Linux x86_64 | ✅ | ✅ 开发原型 | 当前主力目标，要求 glibc ≥ 2.35；图形栈为 X11/Wayland + OpenGL3 |
+| Windows x86_64 | ✅ 交叉编译 | ❌ 尚未原生启动验证 | GUI 子系统，单 EXE；凭据库、SSH Agent、chmod 和系统主题探测受限 |
+
+Windows 目标使用依赖根下预编译好的静态归档，不会自动下载依赖；缺少归档时构建会明确报错。除 UCRT/系统 DLL 外不额外依赖 `SDL2.dll`。
+
+## 快速开始
+
+### 构建依赖
+
+- Zig `0.17.0-dev.1683+5ceec001b`（必须使用该固定版本）
+- Python 3、CMake、make
+- Linux 构建还需要 `apt-get`、`dpkg-deb`（仅用于下载并解包图形栈开发包，不会安装到系统）
+- 网络访问依赖源码归档与图形栈开发包
+
+### 准备依赖
+
+依赖默认放在 `$HOME/下载/JianSSH-deps`，可用 `JIANSSH_DEPS_ROOT` 指向其他位置：
+
+```bash
+export JIANSSH_DEPS_ROOT=/path/to/JianSSH-deps
+./tools/build_core_deps.sh       # zlib / mbedTLS / libssh2 / libvterm / SQLite / Dear ImGui
+./tools/build_desktop_deps.sh    # SDL2 静态代码 + 桌面图形栈头文件
+```
+
+两条脚本都会校验源码 SHA256，并只在独立的依赖根内构建，不修改系统环境。
+
+### 构建与运行
+
+```bash
+./build.sh deps-check            # 检查显式静态归档是否齐全
+./build.sh                       # Linux 桌面版 → zig-out/bin/JianSSH
+./zig-out/bin/JianSSH
+
+./build.sh run                   # 构建后直接运行
+./build.sh dist-linux-x86_64     # 剥离符号的开发原型 → zig-out/dist/JianSSH-linux-x86_64
+./build.sh windows               # Windows x86_64 GUI 原型 → zig-out/bin/JianSSH.exe
+```
+
+最终链接只使用显式静态归档；运行期仍依赖系统的 glibc、X11/Wayland 与 OpenGL 驱动。字体和图标在构建时嵌入二进制，运行时不需要旁置资源文件。
+
+### 命令行参数
+
+```text
+JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件]
+        [--data-dir 目录] [--reduced-motion]
+        [--theme system|dark|light] [--window 宽x高]
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--version` | 打印版本与目标平台后退出 |
+| `--help` | 打印用法后退出 |
+| `--window 宽x高` | 初始窗口尺寸，范围 `300x200` 到 `8192x8192` |
+| `--theme system\|dark\|light` | 覆盖主题设置 |
+| `--reduced-motion` | 减少动态效果 |
+| `--data-dir 目录` | 使用指定目录下的 `jianssh.db`（凭据库位于同目录） |
+| `--smoke-ms N` | 运行 N 毫秒后自动退出，范围 `0..3600000` |
+| `--screenshot 文件.bmp` | 冒烟运行结束前保存 BMP 截图，需配合 `--smoke-ms` |
+| `--metrics 文件` | 退出时写入帧数、等待次数、运行时长、主题等 JSON 摘要 |
+
+### 环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `JIANSSH_TIMING=1` | 向 stderr 输出启动阶段耗时 |
+| `JIANSSH_DEPS_ROOT` | 依赖根目录 |
+| `JIANSSH_CORE_PREFIX` | 覆盖核心静态库前缀 |
+| `JIANSSH_SDL_PREFIX` | 覆盖 SDL2 安装前缀 |
+| `JIANSSH_EXTRA_PREFIX` | 覆盖 Windows 目标的附加依赖前缀 |
+| `JIANSSH_PLATFORM=windows` | 在调用 `tools/build_project.sh` 时强制 Windows 目标 |
+
+## 数据与文件位置
+
+| 内容 | Linux | Windows |
+| --- | --- | --- |
+| 设备数据库 | `${XDG_CONFIG_HOME:-$HOME/.config}/JianSSH/jianssh.db` | `%APPDATA%\JianSSH\jianssh.db` |
+| 加密凭据库 | 数据库同目录下的 `credentials.enc`（密钥为 `credentials.enc.key`） | 不可用（未实现 DPAPI） |
+
+数据库的直属父目录应专用于本应用：程序会将其权限收紧到 `0700`，数据库、WAL、SHM 和凭据库文件为 `0600`。不要把 `--data-dir` 指向共享目录，也不要放入符号链接文件。
+
+保存串口设备需要数据库结构升级到版本 3；现有 SSH 设备与主机信任记录会保留。旧版 JianSSH 不支持打开已升级的数据库，升级前如需保留回退能力，请备份整个应用数据目录。
+
+## 项目结构
+
+```text
+.
+├── build.zig                 # Zig 构建入口（调用 tools/build_project.sh）
+├── build.sh                  # 便捷包装：./build.sh [run|windows|dist-linux-x86_64|deps-check]
+├── include/jianssh/          # 公共头文件
+│   ├── app/                  # 会话、终端、凭据、本地文件等工作线程接口
+│   ├── net/                  # SSH 会话与任务 API
+│   ├── store/                # 设备与主机密钥存储
+│   ├── ui/                   # 界面模型、主题、布局与动效
+│   ├── metrics/              # 远端采样解析
+│   └── util/                 # Zig/C++ 加密桥接
+├── src/
+│   ├── main.cpp              # SDL/ImGui 启动、渲染循环与命令行解析
+│   ├── app/                  # 工作线程与控制器实现
+│   ├── net/                  # libssh2 非阻塞会话实现
+│   ├── store/                # SQLite 存储实现
+│   ├── ui/                   # ImGui 界面实现
+│   ├── metrics/              # 采样脚本与解析实现
+│   └── zig/crypto.zig        # Argon2id、XChaCha20-Poly1305、安全擦除
+├── assets/                   # 图标、字体及字体许可证
+├── tools/                    # 依赖构建、资源嵌入、图标生成与产物校验脚本
+├── third_party/licenses/     # 第三方许可证全文
+├── NOTICE                    # 第三方组件署名
+├── LICENSE                   # MIT
+├── README.md                 # 简体中文
+└── README.en.md              # English
+```
+
+## 架构说明
+
+- **UI 主线程**只处理 SDL 事件、ImGui 绘制和模型快照，不直接进行文件、SQLite 或网络 IO。
+- **HostService** 使用单一 owner 线程访问 SQLite，UI 通过有界命令队列提交操作并轮询不可变快照。
+- **CredentialService** 使用独立工作线程执行本机密钥初始化、加解密和口令读写；退出时清除进程内秘密。
+- **SshSession** 使用单独 IO owner 线程驱动 libssh2，输入、输出和事件队列均有容量上限；超出部分按背压策略处理。
+- **LocalFiles** 与 **Collector** 分别负责本地文件操作和远端采样解析，避免阻塞界面。
+- **按需渲染**：没有动画或新事件时降低帧率/等待事件；字体图集在窗口与 GL 上下文创建期间由后台线程生成，首帧上传 GPU 后释放 CPU 位图。
+
+## 安全模型与边界
+
+- 加密口令采用 Linux 本机密钥模式；复制密文和密钥即可解密，不替代系统账户及磁盘安全。不提供 Windows DPAPI、整库回滚检测或 `mlock`，无法对已控制当前用户的攻击者保密。
+- 主机密钥只保存在应用数据库；不支持导入 OpenSSH hashed `known_hosts`，也暂不提供密钥替换 UI。
+- 终端支持鼠标拖动选择可见屏幕内容，右键菜单可复制或粘贴；也可使用 Ctrl+Shift+C 复制、Ctrl+Shift+V 或 Shift+Insert 粘贴（粘贴需确认）；Ctrl+C 仍发送中断。搜索、完整滚动浏览和全部兼容性回归尚未完成；vim、tmux 与 IME 仍待持续验证。
+- SFTP 的 v1.0 能力（并发、暂停、续传、目录递归等）尚未完成。
+- 远端监控仅支持 Linux 远端；macOS/Windows 远端、多级跳板、代理和端口转发尚未实现。
+- Windows 产物未在 Windows 上原生启动验证；凭据库、SSH Agent、本地 chmod 和系统主题探测在该目标受限。
+- 项目没有自动更新、遥测或云同步；所有设备资料与凭据均保存在本机。
+
+## 参与开发
+
+- 提交改动前请先运行 `./build.sh deps-check` 和 `./build.sh`，确认显式依赖归档与链接路径未被破坏。
+- 依赖版本固定在上文所列版本；升级依赖时同步更新 `tools/build_core_deps.sh`、`tools/build_desktop_deps.sh`、`NOTICE` 和 `third_party/licenses/`。
+- 不要提交 `build/`、`.zig-cache/`、`zig-out/`、数据库或凭据库文件（已在 `.gitignore` 中忽略）。
+
+## 第三方组件与许可
+
+| 组件 | 版本 | 许可证 | 许可证文本 |
+| --- | --- | --- | --- |
+| libssh2 | 1.11.1 | BSD-3-Clause | [third_party/licenses/libssh2.txt](third_party/licenses/libssh2.txt) |
+| mbedTLS | 3.6.4 | Apache-2.0 | [third_party/licenses/mbedTLS.txt](third_party/licenses/mbedTLS.txt) |
+| zlib | 1.3.1 | zlib | [third_party/licenses/zlib.txt](third_party/licenses/zlib.txt) |
+| SDL2 | 2.30.12 | zlib | [third_party/licenses/SDL2.txt](third_party/licenses/SDL2.txt) |
+| Dear ImGui | 1.91.9b-docking | MIT | [third_party/licenses/ImGui.txt](third_party/licenses/ImGui.txt) |
+| libvterm | 0.3.3 | MIT | [third_party/licenses/libvterm.txt](third_party/licenses/libvterm.txt) |
+| SQLite | 3.47.2 | Public Domain | [sqlite.org/copyright.html](https://sqlite.org/copyright.html) |
+| DejaVu Sans / DejaVu Sans Mono | — | Bitstream Vera / Public Domain | [assets/fonts/DejaVu-COPYRIGHT](assets/fonts/DejaVu-COPYRIGHT) |
+| Droid Sans Fallback | — | Apache-2.0 | [assets/fonts/Droid-COPYRIGHT](assets/fonts/Droid-COPYRIGHT) |
+
+运行时加载的系统 X11/Wayland/OpenGL 库不随本项目分发。完整署名与再分发注意事项见 [NOTICE](NOTICE)。
+
+## 开源协议与引用
+
+JianSSH 以 [MIT License](LICENSE) 发布，Copyright (c) 2026 JianSSH contributors。
+
+在论文、报告或衍生项目中引用本项目时，可使用：
+
+```bibtex
+@misc{jianssh,
+  title        = {JianSSH: A Lightweight SSH Desktop Client},
+  author       = {{JianSSH contributors}},
+  year         = {2026},
+  version      = {0.2.0-dev},
+  note         = {C++20, Zig, Dear ImGui, SDL2, libssh2, libvterm, SQLite}
+}
+```
+
+再分发二进制或修改版源码时，请保留 `LICENSE`、`NOTICE` 与 `third_party/licenses/` 中的许可证文本。

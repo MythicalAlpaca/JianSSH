@@ -88,13 +88,16 @@ export JIANSSH_DEPS_ROOT=/path/to/JianSSH-deps
 
 ```bash
 ./build.sh deps-check            # 检查显式静态归档是否齐全
-./build.sh                       # Linux 桌面版 → zig-out/bin/JianSSH
+./build.sh                       # 依次编译全部支持版本：Linux 和 Windows
+./build.sh linux                 # Linux 桌面版 → zig-out/bin/JianSSH
 ./zig-out/bin/JianSSH
 
 ./build.sh run                   # 构建后直接运行
 ./build.sh dist-linux-x86_64     # 剥离符号的发布版 → zig-out/dist/JianSSH-linux-x86_64
 ./build.sh windows               # Windows x86_64 GUI 发布版 → zig-out/bin/JianSSH.exe
 ```
+
+默认构建要求 Linux 和 Windows 两套静态依赖均已准备；任一目标失败时脚本立即报错退出。`./build.sh all` 等同默认行为，其他 Zig 构建选项可追加在目标参数之后。当前仅支持上述两个 x86_64 桌面目标，不包含 macOS。
 
 最终链接只使用显式静态归档；运行期仍依赖系统的 glibc、X11/Wayland 与 OpenGL 驱动。字体和图标在构建时嵌入二进制，运行时不需要旁置资源文件。
 
@@ -145,7 +148,7 @@ JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件]
 ```text
 .
 ├── build.zig                 # Zig 构建入口（调用 tools/build_project.sh）
-├── build.sh                  # 便捷包装：./build.sh [run|windows|dist-linux-x86_64|deps-check]
+├── build.sh                  # 便捷包装：./build.sh [all|linux|windows|run|dist-linux-x86_64|deps-check]
 ├── include/jianssh/          # 公共头文件
 │   ├── app/                  # 会话、终端、凭据、本地文件等工作线程接口
 │   ├── net/                  # SSH 会话与任务 API

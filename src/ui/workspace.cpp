@@ -95,6 +95,7 @@ struct Workspace::Impl {
     std::uint64_t selection_session=0;
     int selection_anchor=0, selection_end=0;
     bool selecting=false, selection_valid=false;
+    unsigned terminal_mouse_buttons=0;
     bool paste_pending=false;
     std::uint64_t paste_session=0;
     std::weak_ptr<app::Terminal> paste_terminal;
@@ -1153,7 +1154,8 @@ struct Workspace::Impl {
         }
         if(ImGui::IsItemClicked()) {terminal_focus=true;ImGui::SetWindowFocus();}
         if(ImGui::IsMouseClicked(0)&&!ImGui::IsItemHovered())terminal_focus=false;
-        const bool context_requested=ImGui::IsItemHovered()&&ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+        const bool report_mouse=s.connected&&s.terminal->mouse_tracking()&&(!ImGui::GetIO().KeyShift||terminal_mouse_buttons)&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle;
+        const bool context_requested=!report_mouse&&ImGui::IsItemHovered()&&ImGui::IsMouseClicked(ImGuiMouseButton_Right);
         if(context_requested){terminal_focus=true;ImGui::OpenPopup("终端操作");}
         auto* dl=ImGui::GetWindowDrawList();
         const float fade=page_alpha;
@@ -1162,7 +1164,7 @@ struct Workspace::Impl {
         dl->PushClipRect(origin,ImVec2(origin.x+avail.x,origin.y+avail.y),true);
         // Bounded screen-only snapshot: never copies/scans terminal history.
         auto snap=s.terminal->snapshot();
-        if(selection_session!=s.id) {selection_session=s.id;selection_valid=false;selecting=false;}
+        if(selection_session!=s.id) {selection_session=s.id;selection_valid=false;selecting=false;terminal_mouse_buttons=0;}
         const int grid_rows=std::min(rows,snap.rows),grid_cols=std::min(cols,snap.cols);
         auto cell_at_mouse=[&] {
             const auto mouse=ImGui::GetIO().MousePos;
@@ -1171,9 +1173,39 @@ struct Workspace::Impl {
             return r*grid_cols+c;
         };
         if(grid_rows>0&&grid_cols>0) {
-            if(ImGui::IsItemClicked()) {selection_anchor=selection_end=cell_at_mouse();selecting=true;selection_valid=false;}
-            if(selecting&&ImGui::IsMouseDown(0)) {selection_end=cell_at_mouse();selection_valid=selection_end!=selection_anchor;}
-            if(selecting&&ImGui::IsMouseReleased(0))selecting=false;
+            auto& io=ImGui::GetIO();
+            app::Modifier mouse_mod=app::Modifier::None;
+            if(io.KeyCtrl)mouse_mod=mouse_mod|app::Modifier::Ctrl;
+            if(io.KeyAlt)mouse_mod=mouse_mod|app::Modifier::Alt;
+            if(io.KeyShift)mouse_mod=mouse_mod|app::Modifier::Shift;
+            const auto mouse=io.MousePos;
+            const bool in_grid=ImGui::IsItemHovered()&&mouse.x>=p.x&&mouse.y>=p.y&&mouse.x<p.x+grid_cols*cw&&mouse.y<p.y+grid_rows*ch;
+            const int cell=cell_at_mouse();
+            if(report_mouse&&(in_grid||terminal_mouse_buttons)) {
+                s.terminal->mouse_move(cell/grid_cols,cell%grid_cols,mouse_mod);
+                const int buttons[]={ImGuiMouseButton_Left,ImGuiMouseButton_Middle,ImGuiMouseButton_Right};
+                for(int i=0;i<3;++i) {
+                    const unsigned bit=1u<<i;
+                    if(in_grid&&ImGui::IsMouseClicked(buttons[i])) {
+                        terminal_mouse_buttons|=bit; selection_valid=false; selecting=false;
+                        terminal_focus=true; ImGui::SetWindowFocus();
+                        s.terminal->mouse_button(i+1,true,mouse_mod);
+                    }
+                    if((terminal_mouse_buttons&bit)&&ImGui::IsMouseReleased(buttons[i])) {
+                        s.terminal->mouse_button(i+1,false,mouse_mod); terminal_mouse_buttons&=~bit;
+                    }
+                }
+                if(in_grid&&io.MouseWheel!=0.f) {
+                    const int button=io.MouseWheel>0?4:5;
+                    const int count=std::max(1,static_cast<int>(std::abs(io.MouseWheel)));
+                    for(int i=0;i<count;++i)s.terminal->mouse_button(button,true,mouse_mod);
+                }
+            } else if(!report_mouse) {
+                terminal_mouse_buttons=0;
+                if(ImGui::IsItemClicked()) {selection_anchor=selection_end=cell;selecting=true;selection_valid=false;}
+                if(selecting&&ImGui::IsMouseDown(0)) {selection_end=cell;selection_valid=selection_end!=selection_anchor;}
+                if(selecting&&ImGui::IsMouseReleased(0))selecting=false;
+            }
         }
         const int selection_first=std::min(selection_anchor,selection_end),selection_last=std::max(selection_anchor,selection_end);
         auto copy_selection=[&] {

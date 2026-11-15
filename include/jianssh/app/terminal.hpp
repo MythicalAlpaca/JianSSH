@@ -80,6 +80,10 @@ public:
     void unichar(char32_t codepoint, Modifier modifiers = Modifier::None);
     void key(Key key, Modifier modifiers = Modifier::None);
     void function_key(unsigned number, Modifier modifiers = Modifier::None); // F1..F255
+    // Zero-based screen coordinates; buttons 1..3 are left/middle/right, 4..7 wheel.
+    [[nodiscard]] bool mouse_tracking() const;
+    void mouse_move(int row, int col, Modifier modifiers = Modifier::None);
+    void mouse_button(int button, bool pressed, Modifier modifiers = Modifier::None);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

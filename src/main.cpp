@@ -88,16 +88,19 @@ int run_application(int argc,char**argv){
  auto add_font=[&](const unsigned char* data,std::size_t bytes,float size,const ImWchar* ranges){
   return io.Fonts->AddFontFromMemoryTTF((void*)data,static_cast<int>(bytes),size,&cfg,ranges);
  };
- auto make_font=[&](const unsigned char* base,std::size_t base_bytes,float size,const ImWchar* fallback_ranges){
-  auto* font=add_font(base,base_bytes,size,io.Fonts->GetGlyphRangesDefault());
+ auto make_font=[&](const unsigned char* base,std::size_t base_bytes,float size,const ImWchar* fallback_ranges,const ImWchar* base_ranges){
+  auto* font=add_font(base,base_bytes,size,base_ranges);
   ImFontConfig merge=cfg;merge.MergeMode=true;
   io.Fonts->AddFontFromMemoryTTF((void*)ui_font,sizeof(ui_font),size,&merge,fallback_ranges);
   return font;
  };
  // macOS-like UI typography: proportional sans for labels, true monospace for terminals.
- fonts.regular=make_font(ui_sans,sizeof(ui_sans),15.5f,body_ranges.Data);
- fonts.heading=make_font(ui_sans,sizeof(ui_sans),24.0f,heading_ranges.Data);
- fonts.mono=make_font(mono_font,sizeof(mono_font),15.5f,body_ranges.Data);
+ // CLI applications use line drawing, block elements, arrows and symbols outside
+ // ImGui's default Latin range. Register those from the monospace face first.
+ static const ImWchar terminal_ranges[]={0x0020,0x024F,0x0300,0x052F,0x1E00,0x1FFF,0x2000,0x2BFF,0xFFFD,0xFFFD,0};
+ fonts.regular=make_font(ui_sans,sizeof(ui_sans),15.5f,body_ranges.Data,io.Fonts->GetGlyphRangesDefault());
+ fonts.heading=make_font(ui_sans,sizeof(ui_sans),24.0f,heading_ranges.Data,io.Fonts->GetGlyphRangesDefault());
+ fonts.mono=make_font(mono_font,sizeof(mono_font),15.5f,body_ranges.Data,terminal_ranges);
  mark("字体注册");
  std::thread font_builder([&io]{unsigned char* pixels=nullptr;int w=0,h=0;io.Fonts->GetTexDataAsRGBA32(&pixels,&w,&h);});
  auto join_fonts=[&]{if(font_builder.joinable())font_builder.join();};

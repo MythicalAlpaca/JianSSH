@@ -88,13 +88,16 @@ Both scripts verify source SHA256 checksums and build only inside the dedicated 
 
 ```bash
 ./build.sh deps-check            # Verify explicit static archives are present
-./build.sh                       # Linux desktop build → zig-out/bin/JianSSH
+./build.sh                       # Build all supported targets sequentially: Linux and Windows
+./build.sh linux                 # Linux desktop build → zig-out/bin/JianSSH
 ./zig-out/bin/JianSSH
 
 ./build.sh run                   # Build and run
 ./build.sh dist-linux-x86_64     # Stripped release build → zig-out/dist/JianSSH-linux-x86_64
 ./build.sh windows               # Windows x86_64 GUI release → zig-out/bin/JianSSH.exe
 ```
+
+The default build requires both Linux and Windows static dependencies and stops on the first failure. `./build.sh all` is equivalent to the default; additional Zig build options may follow the target argument. Only the two x86_64 desktop targets above are currently supported; macOS is not included.
 
 The final link uses explicit static archives only. At runtime the application still depends on the system glibc, X11/Wayland, and OpenGL drivers. Fonts and icons are embedded at build time, so no sidecar resources are needed at runtime.
 
@@ -145,7 +148,7 @@ Saving serial devices upgrades the database schema to version 3 while preserving
 ```text
 .
 ├── build.zig                 # Zig build entry point (calls tools/build_project.sh)
-├── build.sh                  # Convenience wrapper: ./build.sh [run|windows|dist-linux-x86_64|deps-check]
+├── build.sh                  # Convenience wrapper: ./build.sh [all|linux|windows|run|dist-linux-x86_64|deps-check]
 ├── include/jianssh/          # Public headers
 │   ├── app/                  # Session, terminal, credential, and local-file worker APIs
 │   ├── net/                  # SSH session and task API

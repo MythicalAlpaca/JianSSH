@@ -59,10 +59,13 @@ struct Terminal::Impl {
     std::unique_ptr<VTerm, Deleter> vt;
     VTermScreen* screen = nullptr;
     TerminalCursor cursor;
+    bool mouse_tracking = false;
     std::deque<std::vector<VTermScreenCell>> history;
     std::size_t limit;
     WriteCallback writer;
     std::exception_ptr callback_error;
+    // A UTF-8 prefix at a parser-call boundary (at most three bytes).
+    std::string pending_utf8;
 
     void check_error() { if (callback_error) std::rethrow_exception(std::exchange(callback_error, {})); }
     template<class F> int guarded(F&& fn) noexcept {
@@ -77,7 +80,9 @@ struct Terminal::Impl {
         c.row = p.row; c.col = p.col; c.visible = visible; return 1;
     }
     static int property(VTermProp prop, VTermValue* val, void* user) noexcept {
-        auto& c = static_cast<Impl*>(user)->cursor;
+        auto& self = *static_cast<Impl*>(user);
+        auto& c = self.cursor;
+        if (prop == VTERM_PROP_MOUSE) self.mouse_tracking = val->number != VTERM_PROP_MOUSE_NONE;
         if (prop == VTERM_PROP_CURSORVISIBLE) c.visible = val->boolean;
         if (prop == VTERM_PROP_CURSORBLINK) c.blink = val->boolean;
         if (prop == VTERM_PROP_CURSORSHAPE) c.shape = val->number;
@@ -134,16 +139,46 @@ Terminal::Impl& Terminal::impl() { if (!impl_) throw std::logic_error("终端对
 const Terminal::Impl& Terminal::impl() const { if (!impl_) throw std::logic_error("终端对象已被移动"); return *impl_; }
 std::size_t Terminal::feed(std::string_view bytes) {
     auto& s = impl();
-    std::size_t consumed = 0;
-    while (consumed < bytes.size()) {
-        auto n = vterm_input_write(s.vt.get(), bytes.data() + consumed,
-                                  std::min(feed_chunk_size, bytes.size() - consumed));
-        s.check_error();
-        if (!n) throw std::runtime_error("终端解析未能继续");
-        consumed += n;
+    const auto input_size = bytes.size();
+    while (!bytes.empty()) {
+        std::string chunk = std::move(s.pending_utf8);
+        s.pending_utf8.clear();
+        const auto count = std::min(feed_chunk_size - chunk.size(), bytes.size());
+        chunk.append(bytes.data(), count);
+        bytes.remove_prefix(count);
+
+        // libvterm can lose an incomplete codepoint after earlier text in the
+        // same write. Withhold only a potentially valid suffix; ASCII controls
+        // and escape sequences are passed through unchanged and immediately.
+        auto lead = chunk.size();
+        while (lead && chunk.size() - lead < 3 &&
+               (static_cast<unsigned char>(chunk[lead - 1]) & 0xc0) == 0x80) --lead;
+        if (lead) {
+            --lead;
+            const auto first = static_cast<unsigned char>(chunk[lead]);
+            const auto len = first >= 0xc2 && first <= 0xdf ? 2u :
+                             first >= 0xe0 && first <= 0xef ? 3u :
+                             first >= 0xf0 && first <= 0xf4 ? 4u : 0u;
+            const auto have = chunk.size() - lead;
+            bool prefix = len && have < len;
+            if (prefix && have > 1) {
+                const auto second = static_cast<unsigned char>(chunk[lead + 1]);
+                prefix = (second & 0xc0) == 0x80 &&
+                    !(first == 0xe0 && second < 0xa0) && !(first == 0xed && second >= 0xa0) &&
+                    !(first == 0xf0 && second < 0x90) && !(first == 0xf4 && second >= 0x90);
+            }
+            if (prefix) { s.pending_utf8.assign(chunk, lead, have); chunk.resize(lead); }
+        }
+        std::size_t offset = 0;
+        while (offset < chunk.size()) {
+            const auto n = vterm_input_write(s.vt.get(), chunk.data() + offset, chunk.size() - offset);
+            s.check_error();
+            if (!n) throw std::runtime_error("终端解析未能继续");
+            offset += n;
+        }
     }
     vterm_screen_flush_damage(s.screen); s.check_error();
-    return consumed;
+    return input_size;
 }
 void Terminal::resize(int rows, int cols) {
     validate_size(rows, cols);
@@ -242,5 +277,14 @@ void Terminal::key(Key k, Modifier m) {
 void Terminal::function_key(unsigned n, Modifier m) {
     if (!n || n > 255) throw std::invalid_argument("功能键必须在 F1..F255 之间");
     auto& s = impl(); vterm_keyboard_key(s.vt.get(), static_cast<VTermKey>(VTERM_KEY_FUNCTION(n)), mods(m)); s.check_error();
+}
+bool Terminal::mouse_tracking() const { return impl().mouse_tracking; }
+void Terminal::mouse_move(int row, int col, Modifier m) {
+    if (row < 0 || col < 0 || row >= rows() || col >= cols()) throw std::out_of_range("终端鼠标坐标");
+    auto& s = impl(); vterm_mouse_move(s.vt.get(), row, col, mods(m)); s.check_error();
+}
+void Terminal::mouse_button(int button, bool pressed, Modifier m) {
+    if (button < 1 || button > 7) throw std::invalid_argument("终端鼠标按键无效");
+    auto& s = impl(); vterm_mouse_button(s.vt.get(), button, pressed, mods(m)); s.check_error();
 }
 } // namespace jianssh::app

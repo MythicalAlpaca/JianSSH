@@ -1362,7 +1362,7 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     push_theme(v.theme);
     auto* viewport=ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);ImGui::SetNextWindowSize(viewport->WorkSize);
-    ImGui::Begin("JianSSH 工作空间",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::Begin("JianSSH 工作空间",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     {
         auto* dl=ImGui::GetWindowDrawList();
         const ImVec2 p=viewport->Pos,q(viewport->Pos.x+viewport->Size.x,viewport->Pos.y+viewport->Size.y);
@@ -1375,10 +1375,13 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     const auto full=ImGui::GetContentRegionAvail();
     // Column widths always add up to the space the workspace was given.
     const Regions regions=compute_regions(full.x,layout);
-    const float height=region_height(full.y,layout);
+    // Reserve the inter-item gap and the actual footer height, not just the
+    // nominal status-bar height, so fixed panels do not overflow the viewport.
+    const float footer_height=6.f+std::max(18.f,ImGui::GetTextLineHeight());
+    const float height=std::max(1.f,full.y-ImGui::GetStyle().ItemSpacing.y-std::max(layout.status_bar_height,footer_height));
     ImGui::PushStyleColor(ImGuiCol_ChildBg,tone(v.theme.sidebar_bg));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha,.30f+.70f*entry_side);
-    ImGui::BeginChild("设备导航",ImVec2(regions.sidebar,height),true);
+    ImGui::BeginChild("设备导航",ImVec2(regions.sidebar,height),true,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     v.panel_depth(0.045f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY()+8.f*(1.f-entry_side));
     const ImVec2 brand=ImGui::GetCursorScreenPos();
@@ -1467,7 +1470,7 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
     ImGui::SameLine(0,layout.column_gap);
-    ImGui::BeginChild("连接工作区",ImVec2(regions.central,height),true);
+    ImGui::BeginChild("连接工作区",ImVec2(regions.central,height),true,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     v.panel_depth(0.030f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY()+6.f*(1.f-entry));
     const float header_width=ImGui::GetContentRegionAvail().x;
@@ -1645,7 +1648,7 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
             ImGui::SetCursorPosY(ImGui::GetCursorPosY()+std::clamp(v.page_offset,-18.f,18.f));
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha,v.page_alpha);
             const float view_height=std::max(40.f,ImGui::GetContentRegionAvail().y-bar_space);
-            ImGui::BeginChild("会话视图",ImVec2(0,view_height),false);
+            ImGui::BeginChild("会话视图",ImVec2(0,view_height),false,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
             if(v.page_view==0)v.terminal(*shown,cb,fonts); else v.files(*shown,m,cb);
             ImGui::EndChild();
             if(shown_monitor) {ImGui::Dummy(ImVec2(0,layout.metrics_bar_gap));v.metrics_bar(*shown,m,cb);}

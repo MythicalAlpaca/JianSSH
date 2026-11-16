@@ -74,6 +74,7 @@ if [[ ! -f "$crypto_dir/libcredential_crypto.a" || src/zig/crypto.zig -nt "$cryp
 fi
 libs+=("$PWD/$crypto_dir/libcredential_crypto.a")
 python3 tools/embed_assets.py
+python3 tools/prepare_imgui_backend.py "$imgui/backends/imgui_impl_opengl3.cpp" build/generated/imgui_impl_opengl3.cpp
 test -f "$sdl/lib/libSDL2.a" || { echo 'Real desktop SDL missing, cannot use headless musl archives' >&2; exit 1; }
 mkdir -p "$objdir"
 if [[ ! -f "$objdir/flags.txt" || $(<"$objdir/flags.txt") != "${flags[*]}" ]]; then
@@ -87,7 +88,7 @@ if [[ $platform == windows ]]; then
  fi
 fi
 objects=()
-for src in src/main.cpp src/ui/workspace.cpp src/ui/key_file_picker.cpp src/app/workspace_controller.cpp src/app/terminal.cpp src/app/host_service.cpp src/app/local_files.cpp src/app/credential_service.cpp src/app/private_key_file.cpp src/metrics/collector.cpp src/store/database.cpp src/net/ssh_session.cpp src/net/serial_session.cpp "$imgui/backends/imgui_impl_sdl2.cpp" "$imgui/backends/imgui_impl_opengl3.cpp"; do
+for src in src/main.cpp src/ui/workspace.cpp src/ui/key_file_picker.cpp src/app/workspace_controller.cpp src/app/terminal.cpp src/app/host_service.cpp src/app/local_files.cpp src/app/credential_service.cpp src/app/private_key_file.cpp src/metrics/collector.cpp src/store/database.cpp src/net/ssh_session.cpp src/net/serial_session.cpp "$imgui/backends/imgui_impl_sdl2.cpp" build/generated/imgui_impl_opengl3.cpp; do
  obj="$objdir/$(basename "${src%.cpp}").o"
  compile "$src" "$obj"; objects+=("$obj")
 done

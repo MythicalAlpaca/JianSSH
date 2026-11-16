@@ -100,9 +100,19 @@ int run_application(int argc,char**argv){
  static const ImWchar terminal_ranges[]={0x0020,0x024F,0x0300,0x052F,0x1E00,0x1FFF,0x2000,0x2BFF,0xFFFD,0xFFFD,0};
  fonts.regular=make_font(ui_sans,sizeof(ui_sans),15.5f,body_ranges.Data,io.Fonts->GetGlyphRangesDefault());
  fonts.heading=make_font(ui_sans,sizeof(ui_sans),24.0f,heading_ranges.Data,io.Fonts->GetGlyphRangesDefault());
- fonts.mono=make_font(mono_font,sizeof(mono_font),15.5f,body_ranges.Data,terminal_ranges);
+  fonts.mono=add_font(mono_font,sizeof(mono_font),15.5f,terminal_ranges);
  mark("字体注册");
- std::thread font_builder([&io]{unsigned char* pixels=nullptr;int w=0,h=0;io.Fonts->GetTexDataAsRGBA32(&pixels,&w,&h);});
+  std::thread font_builder([&io,&fonts]{
+   unsigned char* pixels=nullptr;int w=0,h=0;io.Fonts->GetTexDataAsAlpha8(&pixels,&w,&h);
+   // Both faces use the same fallback at 15.5 px. Reuse its atlas rectangles
+   // instead of rasterizing ~21,000 CJK glyphs twice. Keep the mono face's
+   // own Latin, line drawing and symbols whenever it provides a glyph.
+   for(const auto& glyph:fonts.regular->Glyphs){
+    if(glyph.Codepoint<0x2000||fonts.mono->FindGlyphNoFallback(static_cast<ImWchar>(glyph.Codepoint)))continue;
+    fonts.mono->AddGlyph(nullptr,static_cast<ImWchar>(glyph.Codepoint),glyph.X0,glyph.Y0,glyph.X1,glyph.Y1,glyph.U0,glyph.V0,glyph.U1,glyph.V1,glyph.AdvanceX);
+   }
+   fonts.mono->BuildLookupTable();
+  });
  auto join_fonts=[&]{if(font_builder.joinable())font_builder.join();};
  // SDL consults this when the main window is created, before ImGui's backend
  // gets a chance to set it. Native IME UI supplies composition/candidate text.

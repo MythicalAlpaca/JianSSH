@@ -3,6 +3,7 @@
 #include <vterm.h>
 #include <algorithm>
 #include <deque>
+#include <cstring>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -60,7 +61,19 @@ struct Terminal::Impl {
     VTermScreen* screen = nullptr;
     TerminalCursor cursor;
     bool mouse_tracking = false;
-    std::deque<std::vector<VTermScreenCell>> history;
+    struct HistoryLine {
+        int cols;
+        VTermScreenCell tail;
+        std::vector<VTermScreenCell> cells;
+        HistoryLine(int count, const VTermScreenCell* data) : cols(count), tail(data[count - 1]) {
+            // Preserve the exact final cell (including colour/style/width), but
+            // store repeated trailing cells only once. Typical shell output has
+            // long blank tails. A byte comparison is conservative and lossless.
+            while (count && std::memcmp(&data[count - 1], &tail, sizeof(tail)) == 0) --count;
+            cells.assign(data, data + count);
+        }
+    };
+    std::deque<HistoryLine> history;
     std::size_t limit;
     WriteCallback writer;
     std::exception_ptr callback_error;
@@ -94,7 +107,7 @@ struct Terminal::Impl {
             if (self.limit) {
                 // Evict first to never temporarily exceed the configured line limit.
                 if (self.history.size() >= self.limit) self.history.pop_front();
-                self.history.emplace_back(cells, cells + cols);
+                if (cols > 0) self.history.emplace_back(cols, cells);
             }
             return 1;
         });
@@ -107,7 +120,9 @@ struct Terminal::Impl {
         VTermScreenCell blank{}; blank.width = 1;
         blank.fg.type = VTERM_COLOR_DEFAULT_FG; blank.bg.type = VTERM_COLOR_DEFAULT_BG;
         std::fill(cells, cells + cols, blank);
-        std::copy_n(line.begin(), std::min(line.size(), static_cast<std::size_t>(cols)), cells);
+        const auto restored = std::min(line.cols, cols);
+        std::fill_n(cells, restored, line.tail);
+        std::copy_n(line.cells.begin(), std::min(line.cells.size(), static_cast<std::size_t>(cols)), cells);
         self.history.pop_back(); return 1;
     }
     static int clear(void* user) noexcept { static_cast<Impl*>(user)->history.clear(); return 1; }
@@ -226,8 +241,9 @@ std::vector<TerminalLine> Terminal::scrollback() const {
     std::vector<TerminalLine> result;
     result.reserve(impl().history.size());
     for (const auto& raw : impl().history) {
-        TerminalLine line; line.reserve(raw.size());
-        for (const auto& c : raw) line.push_back(convert_cell(c));
+        TerminalLine line; line.reserve(raw.cols);
+        for (const auto& c : raw.cells) line.push_back(convert_cell(c));
+        while (line.size() < static_cast<std::size_t>(raw.cols)) line.push_back(convert_cell(raw.tail));
         result.push_back(std::move(line));
     }
     return result;

@@ -2,8 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mode=${1:-build}; shift || true
-root=${JIANSSH_DEPS_ROOT:-/home/zhangxx/下载/JianSSH-deps}
-imgui="$root/core/build/imgui-1.91.9b-docking"
+imgui="$PWD/include/imgui"
 mkdir -p build/obj zig-out/bin
 export ZIG_GLOBAL_CACHE_DIR="$PWD/build/zig-cache"
 
@@ -15,18 +14,18 @@ if [[ ${JIANSSH_PLATFORM:-} == windows ]]; then platform=windows; fi
 
 if [[ $platform == windows ]]; then
  target=x86_64-windows-gnu
- core=${JIANSSH_CORE_PREFIX:-$root/ssh/install/windows-x86_64-gnu}
- extra=${JIANSSH_EXTRA_PREFIX:-$root/core/out/x86_64-windows-gnu}
- sdl=${JIANSSH_SDL_PREFIX:-$root/sdl/install/windows-x86_64-gnu}
- flags=(-target "$target" -std=c++20 -O2 -g -Wall -Wextra -Wpedantic
-   -Iinclude -I"$core/include" -I"$extra/include" -I"$extra/include/imgui"
+  core=${JIANSSH_CORE_PREFIX:-$PWD}
+  extra=${JIANSSH_EXTRA_PREFIX:-$PWD}
+  sdl=${JIANSSH_SDL_PREFIX:-$PWD}
+  flags=(-target "$target" -std=c++20 -O2 -g -Wall -Wextra -Wpedantic
+    -Iinclude -I"$imgui" -Iinclude/vendor/windows -Iinclude/vendor/windows/SDL2 -I"$core/include" -I"$extra/include" -I"$extra/include/imgui"
    -I"$extra/include/libvterm" -I"$extra/include/sqlite" -I"$sdl/include/SDL2"
    -I"$imgui/backends" -Ibuild/generated)
  libs=()
- for p in "$extra/lib/libimgui.a" "$extra/lib/libvterm.a" "$extra/lib/libsqlite3.a" \
-          "$core/lib/libssh2.a" "$core/lib/libmbedtls.a" "$core/lib/libmbedx509.a" \
-          "$core/lib/libmbedcrypto.a" "$core/lib/libeverest.a" "$core/lib/libp256m.a" \
-          "$core/lib/libz.a"; do
+   for p in "$PWD/lib/windows/libimgui.a" "$extra/lib/windows/libvterm.a" "$extra/lib/windows/libsqlite3.a" \
+           "$core/lib/windows/libssh2.a" "$core/lib/windows/libmbedtls.a" "$core/lib/windows/libmbedx509.a" \
+           "$core/lib/windows/libmbedcrypto.a" "$core/lib/windows/libeverest.a" "$core/lib/windows/libp256m.a" \
+           "$core/lib/windows/libz.a"; do
    test -f "$p" || { echo "Missing $p; build the Windows dependency archives first" >&2; exit 1; }
    libs+=("$p")
  done
@@ -36,28 +35,29 @@ if [[ $platform == windows ]]; then
    # GUI subsystem: SDL2main supplies WinMain and main maps to SDL_main,
    # so double-clicking the EXE never opens a console window.
    flags+=(-Dmain=SDL_main)
-   libs+=("$sdl/lib/libSDL2main.a" "$sdl/lib/libSDL2.a")
+    libs+=("$sdl/lib/windows/libSDL2main.a" "$sdl/lib/windows/libSDL2.a")
    link_extra+=(-Wl,--subsystem,windows)
    binary=zig-out/bin/JianSSH.exe
    objdir=build/obj-windows
 else
  target=x86_64-linux-gnu.2.35
- core=${JIANSSH_CORE_PREFIX:-$root/linux-core-glibc/prefix}
- sdl=${JIANSSH_SDL_PREFIX:-$root/linux-desktop-glibc/install}
+  core=${JIANSSH_CORE_PREFIX:-$PWD}
+  sdl=${JIANSSH_SDL_PREFIX:-$PWD}
  flags=(-target "$target" -std=c++20 -O2 -g -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -pthread
-   -Iinclude -I"$core/include" -I"$core/include/imgui" -I"$sdl/include/SDL2"
-   -I"$root/linux-desktop-glibc/include-host" -I"$imgui/backends" -Ibuild/generated)
- libs=()
- for name in imgui vterm sqlite3 ssh2 mbedtls mbedx509 mbedcrypto everest p256m z; do
-   p="$core/lib/lib$name.a"; test -f "$p" || { echo "Missing $p; run tools/build_core_deps.sh" >&2; exit 1; }; libs+=("$p")
+    -Iinclude -I"$imgui" -Iinclude/vendor/linux -Iinclude/vendor/linux/SDL2 -I"$core/include"
+    -Iinclude/vendor/linux/graphics -I"$imgui/backends" -Ibuild/generated)
+  test -f "$PWD/lib/linux/libimgui.a" || { echo 'Missing lib/linux/libimgui.a' >&2; exit 1; }
+  libs=("$PWD/lib/linux/libimgui.a")
+  for name in vterm sqlite3 ssh2 mbedtls mbedx509 mbedcrypto everest p256m z; do
+    p="$core/lib/linux/lib$name.a"; test -f "$p" || { echo "Missing $p; run tools/build_core_deps.sh" >&2; exit 1; }; libs+=("$p")
  done
- link_extra=("$sdl/lib/libSDL2.a" -ldl -lm)
+  link_extra=("$sdl/lib/linux/libSDL2.a" -ldl -lm)
  binary=zig-out/bin/JianSSH
  objdir=build/obj
 fi
 
 if [[ $mode == deps-check ]]; then
- test -f "$sdl/lib/libSDL2.a" || { echo 'Missing desktop SDL; run tools/build_desktop_deps.sh' >&2; exit 1; }
+  test -f "$sdl/lib/$platform/libSDL2.a" || { echo 'Missing desktop SDL; run tools/build_desktop_deps.sh' >&2; exit 1; }
  echo 'Explicit glibc core and desktop SDL archives present'; exit 0
 fi
 compile() {
@@ -75,7 +75,7 @@ fi
 libs+=("$PWD/$crypto_dir/libcredential_crypto.a")
 python3 tools/embed_assets.py
 python3 tools/prepare_imgui_backend.py "$imgui/backends/imgui_impl_opengl3.cpp" build/generated/imgui_impl_opengl3.cpp
-test -f "$sdl/lib/libSDL2.a" || { echo 'Real desktop SDL missing, cannot use headless musl archives' >&2; exit 1; }
+test -f "$sdl/lib/$platform/libSDL2.a" || { echo 'Real desktop SDL missing, cannot use headless musl archives' >&2; exit 1; }
 mkdir -p "$objdir"
 if [[ ! -f "$objdir/flags.txt" || $(<"$objdir/flags.txt") != "${flags[*]}" ]]; then
  rm -rf "$objdir"; mkdir -p "$objdir"; printf '%s\n' "${flags[*]}" > "$objdir/flags.txt"

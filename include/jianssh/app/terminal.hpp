@@ -64,6 +64,11 @@ public:
     [[nodiscard]] TerminalCell cell(int row, int col) const;
     [[nodiscard]] TerminalCursor cursor() const;
     [[nodiscard]] TerminalSnapshot snapshot() const;
+    // Visible history + screen only; positive delta scrolls towards older output.
+    [[nodiscard]] TerminalSnapshot viewport_snapshot() const;
+    void scroll(int delta);
+    void scroll_to_bottom();
+    [[nodiscard]] std::size_t scroll_offset() const;
     // Screen only, trailing blank cells trimmed, rows separated by '\n'.
     [[nodiscard]] std::string text() const;
     // Owned copies, oldest first; historical lines retain their original column count.

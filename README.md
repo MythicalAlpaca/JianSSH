@@ -23,6 +23,7 @@
 
 - 后台单 owner 非阻塞 SSH IO，支持交互 PTY、窗口尺寸变化和有界输出背压。
 - 基于 libvterm 的终端渲染，回滚上限 2000 行。
+- 鼠标滚轮上下浏览回滚历史，Shift+PageUp/PageDown 翻页；输入时回到实时屏幕，也可通过右键菜单“回到实时输出”返回。在启用鼠标上报的 vim/tmux 等程序中，滚轮仍交给远端，按住 Shift 可浏览本地历史。
 - 输入、粘贴与 PTY resize 不阻塞界面线程；粘贴先预览确认并限制大小。
 - 不自动重连、不重放历史输入；断线后由用户显式重新连接。
 
@@ -74,12 +75,15 @@ Windows 目标使用依赖根下预编译好的静态归档，不会自动下载
 
 ### 准备依赖
 
-依赖默认放在 `$HOME/下载/JianSSH-deps`，可用 `JIANSSH_DEPS_ROOT` 指向其他位置：
+两平台静态库分别保存在 `lib/linux/`、`lib/windows/`；配套头文件位于 `include/vendor/linux/`、`include/vendor/windows/`，ImGui 头文件及 SDL/OpenGL 后端位于 `include/imgui/`。正常编译直接使用项目内的库和头文件，不需要下载依赖源码。以下命令仅用于重建其他依赖，`deps/` 为可清理的暂存目录：
 
 ```bash
-export JIANSSH_DEPS_ROOT=/path/to/JianSSH-deps
-./tools/build_core_deps.sh       # zlib / mbedTLS / libssh2 / libvterm / SQLite / Dear ImGui
+python3 tools/fetch_deps.py      # 首次下载并校验固定版本源码到项目 deps/
+./tools/build_core_deps.sh       # zlib / mbedTLS / libssh2 / libvterm / SQLite（ImGui 使用内置归档）
 ./tools/build_desktop_deps.sh    # SDL2 静态代码 + 桌面图形栈头文件
+bash tools/build_core_deps.sh --windows
+bash tools/build_windows_desktop_deps.sh
+python3 tools/import_deps.py     # 将已安装静态库与头文件归入 lib/ 和 include/vendor/
 ```
 
 两条脚本都会校验源码 SHA256，并只在独立的依赖根内构建，不修改系统环境。
@@ -126,10 +130,10 @@ JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件]
 | 变量 | 说明 |
 | --- | --- |
 | `JIANSSH_TIMING=1` | 向 stderr 输出启动阶段耗时 |
-| `JIANSSH_DEPS_ROOT` | 依赖根目录 |
-| `JIANSSH_CORE_PREFIX` | 覆盖核心静态库前缀 |
-| `JIANSSH_SDL_PREFIX` | 覆盖 SDL2 安装前缀 |
-| `JIANSSH_EXTRA_PREFIX` | 覆盖 Windows 目标的附加依赖前缀 |
+| `JIANSSH_DEPS_ROOT` | 重建依赖时的暂存根目录，正常应用构建不需要 |
+| `JIANSSH_CORE_PREFIX` | 覆盖核心库根目录，归档需位于其 `lib/linux/` 或 `lib/windows/` |
+| `JIANSSH_SDL_PREFIX` | 覆盖 SDL2 库根目录，使用同样的平台子目录布局 |
+| `JIANSSH_EXTRA_PREFIX` | 覆盖 Windows 附加库根目录，归档位于其 `lib/windows/` |
 | `JIANSSH_PLATFORM=windows` | 在调用 `tools/build_project.sh` 时强制 Windows 目标 |
 
 ## 数据与文件位置
@@ -187,7 +191,7 @@ JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件]
 
 - 加密口令采用 Linux 本机密钥模式；复制密文和密钥即可解密，不替代系统账户及磁盘安全。不提供整库回滚检测或 `mlock`，无法对已控制当前用户的攻击者保密。Windows 未实现 DPAPI 或等价的系统凭据后端，口令不会持久化。
 - 主机密钥只保存在应用数据库；不支持导入 OpenSSH hashed `known_hosts`，也暂不提供密钥替换 UI。
-- 终端支持鼠标拖动选择可见屏幕内容，右键菜单可复制或粘贴；也可使用 Ctrl+Shift+C 复制、Ctrl+Shift+V 或 Shift+Insert 粘贴（粘贴需确认）；Ctrl+C 仍发送中断。搜索、完整滚动浏览和全部兼容性回归尚未完成；vim、tmux 与 IME 仍待持续验证。
+- 终端支持鼠标拖动选择当前可见内容（含回滚历史），右键菜单可复制或粘贴；也可使用 Ctrl+Shift+C 复制、Ctrl+Shift+V 或 Shift+Insert 粘贴（粘贴需确认）；Ctrl+C 仍发送中断。搜索和全部兼容性回归尚未完成；vim、tmux 与 IME 仍待持续验证。
 - SFTP 的高级能力（并发、暂停、续传、目录递归等）尚未实现，将在后续版本评估。
 - 远端监控仅支持 Linux 远端；macOS/Windows 远端、多级跳板、代理和端口转发尚未实现。
 - Windows 已通过实机运行验证；凭据库、SSH Agent、本地 chmod 在该目标不可用，系统主题探测不可用（系统主题模式回退为深色）。

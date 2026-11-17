@@ -75,6 +75,7 @@ struct Terminal::Impl {
     };
     std::deque<HistoryLine> history;
     std::size_t limit;
+    std::size_t viewport_offset = 0;
     WriteCallback writer;
     std::exception_ptr callback_error;
     // A UTF-8 prefix at a parser-call boundary (at most three bytes).
@@ -95,6 +96,7 @@ struct Terminal::Impl {
     static int property(VTermProp prop, VTermValue* val, void* user) noexcept {
         auto& self = *static_cast<Impl*>(user);
         auto& c = self.cursor;
+        if (prop == VTERM_PROP_ALTSCREEN) self.viewport_offset = 0;
         if (prop == VTERM_PROP_MOUSE) self.mouse_tracking = val->number != VTERM_PROP_MOUSE_NONE;
         if (prop == VTERM_PROP_CURSORVISIBLE) c.visible = val->boolean;
         if (prop == VTERM_PROP_CURSORBLINK) c.blink = val->boolean;
@@ -108,6 +110,7 @@ struct Terminal::Impl {
                 // Evict first to never temporarily exceed the configured line limit.
                 if (self.history.size() >= self.limit) self.history.pop_front();
                 if (cols > 0) self.history.emplace_back(cols, cells);
+                if (self.viewport_offset) self.viewport_offset = std::min(self.viewport_offset + 1, self.history.size());
             }
             return 1;
         });
@@ -123,9 +126,9 @@ struct Terminal::Impl {
         const auto restored = std::min(line.cols, cols);
         std::fill_n(cells, restored, line.tail);
         std::copy_n(line.cells.begin(), std::min(line.cells.size(), static_cast<std::size_t>(cols)), cells);
-        self.history.pop_back(); return 1;
+        self.history.pop_back(); self.viewport_offset = std::min(self.viewport_offset, self.history.size()); return 1;
     }
-    static int clear(void* user) noexcept { static_cast<Impl*>(user)->history.clear(); return 1; }
+    static int clear(void* user) noexcept { auto& self=*static_cast<Impl*>(user);self.history.clear();self.viewport_offset=0;return 1; }
     Impl(int rows, int cols, std::size_t max_lines) : limit(max_lines) {
         validate_size(rows, cols);
         vt.reset(vterm_new(rows, cols));
@@ -237,6 +240,37 @@ std::string Terminal::text() const {
     if (!result.empty()) result.pop_back();
     return result;
 }
+TerminalSnapshot Terminal::viewport_snapshot() const {
+    const auto& s = impl();
+    if (!s.viewport_offset) return snapshot();
+    TerminalSnapshot result{rows(), cols(), cursor(), {}};
+    result.cursor.visible = false;
+    result.lines.reserve(result.rows);
+    const auto start = s.history.size() - s.viewport_offset;
+    for (int r = 0; r < result.rows; ++r) {
+        TerminalLine line; line.reserve(result.cols);
+        const auto index = start + static_cast<std::size_t>(r);
+        if (index < s.history.size()) {
+            const auto& raw = s.history[index];
+            for (int c = 0; c < result.cols; ++c) {
+                if (c >= raw.cols) line.emplace_back();
+                else line.push_back(convert_cell(static_cast<std::size_t>(c) < raw.cells.size() ? raw.cells[c] : raw.tail));
+            }
+        } else {
+            const auto screen_row = static_cast<int>(index - s.history.size());
+            for (int c = 0; c < result.cols; ++c) line.push_back(cell(screen_row, c));
+        }
+        result.lines.push_back(std::move(line));
+    }
+    return result;
+}
+void Terminal::scroll(int delta) {
+    auto& s = impl();
+    const auto next = static_cast<std::int64_t>(s.viewport_offset) + delta;
+    s.viewport_offset = static_cast<std::size_t>(std::clamp<std::int64_t>(next, 0, static_cast<std::int64_t>(s.history.size())));
+}
+void Terminal::scroll_to_bottom() { impl().viewport_offset = 0; }
+std::size_t Terminal::scroll_offset() const { return impl().viewport_offset; }
 std::vector<TerminalLine> Terminal::scrollback() const {
     std::vector<TerminalLine> result;
     result.reserve(impl().history.size());
@@ -253,12 +287,14 @@ std::size_t Terminal::scrollback_limit() const { return impl().limit; }
 void Terminal::set_scrollback_limit(std::size_t limit) {
     auto& s = impl(); s.limit = limit;
     while (s.history.size() > limit) s.history.pop_front();
+    s.viewport_offset = std::min(s.viewport_offset, s.history.size());
 }
-void Terminal::clear_scrollback() { impl().history.clear(); }
+void Terminal::clear_scrollback() { impl().history.clear(); impl().viewport_offset = 0; }
 void Terminal::set_write_callback(WriteCallback cb) { impl().writer = std::move(cb); }
 void Terminal::write_utf8(std::string_view text) {
     auto& s = impl();
     if (!s.writer || text.empty()) return;
+    s.viewport_offset = 0;
     // Collect the mode-dependent wrappers and payload before one admission decision.
     std::string payload;
     auto writer = std::move(s.writer);

@@ -1154,7 +1154,12 @@ struct Workspace::Impl {
         }
         if(ImGui::IsItemClicked()) {terminal_focus=true;ImGui::SetWindowFocus();}
         if(ImGui::IsMouseClicked(0)&&!ImGui::IsItemHovered())terminal_focus=false;
-        const bool report_mouse=s.connected&&s.terminal->mouse_tracking()&&(!ImGui::GetIO().KeyShift||terminal_mouse_buttons)&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle;
+        const bool report_mouse=s.connected&&s.terminal->scroll_offset()==0&&s.terminal->mouse_tracking()&&(!ImGui::GetIO().KeyShift||terminal_mouse_buttons)&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle;
+        if(!report_mouse&&ImGui::IsItemHovered()&&ImGui::GetIO().MouseWheel!=0.f&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle) {
+            const float wheel=ImGui::GetIO().MouseWheel;
+            s.terminal->scroll(wheel>0?std::max(1,static_cast<int>(wheel*3)):std::min(-1,static_cast<int>(wheel*3)));
+            selection_valid=false;selecting=false;
+        }
         const bool context_requested=!report_mouse&&ImGui::IsItemHovered()&&ImGui::IsMouseClicked(ImGuiMouseButton_Right);
         if(context_requested){terminal_focus=true;ImGui::OpenPopup("终端操作");}
         auto* dl=ImGui::GetWindowDrawList();
@@ -1162,8 +1167,8 @@ struct Workspace::Impl {
         dl->AddRectFilled(origin,ImVec2(origin.x+avail.x,origin.y+avail.y),fade_color(theme.terminal_bg,fade),layout.terminal_rounding);
         const ImVec2 p(origin.x+layout.terminal_padding,origin.y+layout.terminal_padding);
         dl->PushClipRect(origin,ImVec2(origin.x+avail.x,origin.y+avail.y),true);
-        // Bounded screen-only snapshot: never copies/scans terminal history.
-        auto snap=s.terminal->snapshot();
+        // Only copy visible rows, even when browsing a full history buffer.
+        auto snap=s.terminal->viewport_snapshot();
         if(selection_session!=s.id) {selection_session=s.id;selection_valid=false;selecting=false;terminal_mouse_buttons=0;}
         const int grid_rows=std::min(rows,snap.rows),grid_cols=std::min(cols,snap.cols);
         auto cell_at_mouse=[&] {
@@ -1259,6 +1264,7 @@ struct Workspace::Impl {
         dl->PopClipRect();
         if(ImGui::BeginPopup("终端操作")) {
             terminal_menu_open=true;
+            if(ImGui::MenuItem("回到实时输出",nullptr,false,s.terminal->scroll_offset()!=0)) {s.terminal->scroll_to_bottom();selection_valid=false;restore_terminal_focus=true;}
             if(ImGui::MenuItem("复制选中内容", "Ctrl+Shift+C", false, selection_valid)) {copy_selection();restore_terminal_focus=true;}
             if(ImGui::MenuItem("粘贴", "Ctrl+Shift+V", false, s.connected)) {request_paste(s);}
             ImGui::EndPopup();
@@ -1273,11 +1279,18 @@ struct Workspace::Impl {
         if(io.KeyShift) mod=mod|app::Modifier::Shift;
         struct Map {ImGuiKey imgui;app::Key terminal;};
         static constexpr Map keys[]={{ImGuiKey_Enter,app::Key::Enter},{ImGuiKey_KeypadEnter,app::Key::Enter},{ImGuiKey_Tab,app::Key::Tab},{ImGuiKey_Backspace,app::Key::Backspace},{ImGuiKey_Escape,app::Key::Escape},{ImGuiKey_UpArrow,app::Key::Up},{ImGuiKey_DownArrow,app::Key::Down},{ImGuiKey_LeftArrow,app::Key::Left},{ImGuiKey_RightArrow,app::Key::Right},{ImGuiKey_Insert,app::Key::Insert},{ImGuiKey_Delete,app::Key::Delete},{ImGuiKey_Home,app::Key::Home},{ImGuiKey_End,app::Key::End},{ImGuiKey_PageUp,app::Key::PageUp},{ImGuiKey_PageDown,app::Key::PageDown}};
-        if(io.KeyCtrl&&io.KeyShift&&ImGui::IsKeyPressed(ImGuiKey_C,false)) {
+        if(io.KeyShift&&(ImGui::IsKeyPressed(ImGuiKey_PageUp)||ImGui::IsKeyPressed(ImGuiKey_PageDown))) {
+            s.terminal->scroll(ImGui::IsKeyPressed(ImGuiKey_PageUp)?std::max(1,rows-1):-std::max(1,rows-1));
+            selection_valid=false;selecting=false;
+        }
+        else if(io.KeyCtrl&&io.KeyShift&&ImGui::IsKeyPressed(ImGuiKey_C,false)) {
             copy_selection();
         }
         else if((io.KeyCtrl&&io.KeyShift&&ImGui::IsKeyPressed(ImGuiKey_V,false)) || (io.KeyShift&&!io.KeyCtrl&&ImGui::IsKeyPressed(ImGuiKey_Insert,false))) request_paste(s);
         else {
+            bool typing=io.InputQueueCharacters.Size>0;
+            for(const auto& k:keys)typing|=ImGui::IsKeyPressed(k.imgui);
+            if(typing){s.terminal->scroll_to_bottom();selection_valid=false;}
             for(const auto& k:keys)if(ImGui::IsKeyPressed(k.imgui))s.terminal->key(k.terminal,mod);
             for(int i=0;i<12;++i)if(ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_F1+i)))s.terminal->function_key(i+1,mod);
             if(io.KeyCtrl) {

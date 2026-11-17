@@ -11,9 +11,23 @@ int main() {
     assert(history.front().size() == 80);
     assert(history.front()[0].text == "f");
     assert(history.front()[5].text.empty());
+    terminal.scroll(2);
+    auto viewport = terminal.viewport_snapshot();
+    assert(viewport.lines.size() == 2);
+    assert(viewport.lines[0][0].text == "s"); // second
+    assert(viewport.lines[1][0].text == "t"); // third
+    assert(!viewport.cursor.visible);
+    terminal.feed("\r\nsixth");
+    assert(terminal.scroll_offset() == 3); // preserve position as output arrives
+    assert(terminal.viewport_snapshot().lines[0][0].text == "s");
+    terminal.scroll(-100);
+    assert(terminal.scroll_offset() == 0);
+    terminal.scroll(100);
+    assert(terminal.scroll_offset() == 3);
+    terminal.scroll_to_bottom();
     terminal.resize(5, 80);
     assert(terminal.scrollback_size() == 0);
-    assert(terminal.text() == "first\nsecond\nthird\nfourth\nfifth");
+    assert(terminal.text() == "second\nthird\nfourth\nfifth\nsixth");
 
     // A coloured blank tail must survive compression and resize restoration.
     Terminal coloured(2, 80, 10);
@@ -38,6 +52,17 @@ int main() {
     wide.set_scrollback_limit(0);
     wide.feed("\r\na\r\nb\r\nc\r\n");
     assert(wide.scrollback_size() == 0);
+    Terminal reset(2, 10, 10);
+    reset.feed("one\r\ntwo\r\nthree");
+    reset.scroll(100);
+    assert(reset.scroll_offset() == 1);
+    reset.feed("\x1b[?1049h");
+    assert(reset.scroll_offset() == 0);
+    reset.feed("\x1b[?1049l");
+    reset.scroll(100);
+    reset.clear_scrollback();
+    assert(reset.scroll_offset() == 0);
+    assert(reset.viewport_snapshot().lines.size() == 2);
 
     // Run with /usr/bin/time -v to compare populated multi-session history.
     std::vector<Terminal> sessions;

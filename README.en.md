@@ -74,12 +74,15 @@ The Windows target uses prebuilt static archives from the dependency root and ne
 
 ### Prepare dependencies
 
-Dependencies default to `$HOME/下载/JianSSH-deps`. Override with `JIANSSH_DEPS_ROOT`:
+Static archives are bundled in `lib/linux/` and `lib/windows/`, with matching headers in `include/vendor/<platform>/`. ImGui headers and required SDL/OpenGL backends live in `include/imgui/`. Normal application builds do not need dependency sources. To rebuild dependencies using the temporary `deps/` staging directory:
 
 ```bash
-export JIANSSH_DEPS_ROOT=/path/to/JianSSH-deps
-./tools/build_core_deps.sh       # zlib / mbedTLS / libssh2 / libvterm / SQLite / Dear ImGui
+python3 tools/fetch_deps.py
+./tools/build_core_deps.sh       # zlib / mbedTLS / libssh2 / libvterm / SQLite
 ./tools/build_desktop_deps.sh    # SDL2 static code + desktop graphics headers
+bash tools/build_core_deps.sh --windows
+bash tools/build_windows_desktop_deps.sh
+python3 tools/import_deps.py
 ```
 
 Both scripts verify source SHA256 checksums and build only inside the dedicated dependency root; they do not modify the system environment.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # SDL2 static code + dynamically loaded desktop drivers; never installs host packages.
 set -Eeuo pipefail
-ROOT=${DESKTOP_DEPS_ROOT:-/home/zhangxx/下载/JianSSH-deps/linux-desktop-glibc}
-SOURCE=${SDL_SOURCE:-/home/zhangxx/下载/JianSSH-deps/sdl/SDL2-2.30.12}
+PROJECT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+DEPS_ROOT=${JIANSSH_DEPS_ROOT:-$PROJECT_ROOT/deps}
+ROOT=${DESKTOP_DEPS_ROOT:-$DEPS_ROOT/linux-desktop-glibc}
+SOURCE=${SDL_SOURCE:-$DEPS_ROOT/sdl/SDL2-2.30.12}
 ZIG=${ZIG:-$(command -v zig)}
 GLIBC_BASELINE=${GLIBC_BASELINE:-2.28}
 JOBS=${JOBS:-4}

@@ -5,11 +5,10 @@
 使用与应用相同的 libvterm 静态库，开启断言构建测试：
 
 ```bash
-DEPS=${JIANSSH_DEPS_ROOT:-$HOME/下载/JianSSH-deps}
 zig c++ -std=c++20 -O2 -UNDEBUG -Iinclude \
-  -I"$DEPS/linux-core-glibc/prefix/include" \
+  -Iinclude/vendor/linux \
   tools/test_terminal_memory.cpp src/app/terminal.cpp \
-  "$DEPS/linux-core-glibc/prefix/lib/libvterm.a" \
+  lib/linux/libvterm.a \
   -o /tmp/opencode/test-terminal-memory
 /usr/bin/time -v /tmp/opencode/test-terminal-memory
 ```

@@ -1,5 +1,6 @@
 # Build output and caches
 /build/
+/deps/
 /zig-out/
 /.zig-cache/
 __pycache__/

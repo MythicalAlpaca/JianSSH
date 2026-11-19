@@ -1,4 +1,5 @@
 #include "jianssh/app/local_files.hpp"
+#include "jianssh/app/file_paths.hpp"
 #include <atomic>
 #include <algorithm>
 #include <cerrno>
@@ -63,10 +64,6 @@ struct Fd {
     default: fail(LocalFileError::IoError,"本地文件操作失败");
     }
 }
-std::string narrow(const std::filesystem::path& p) {
-    const auto s=p.u8string();
-    return std::string(s.begin(),s.end());
-}
 std::int64_t unix_seconds(std::filesystem::file_time_type t) {
     using namespace std::chrono;
     const auto sys=time_point_cast<seconds>(t-decltype(t)::clock::now()+system_clock::now());
@@ -98,7 +95,7 @@ struct Target {
     explicit Target(const std::filesystem::path& p) {
         validate(p);
 #ifdef _WIN32
-        leaf=narrow(p.filename());
+        leaf=utf8_path(p.filename());
 #else
         leaf=p.filename().native();
 #endif
@@ -180,6 +177,7 @@ struct LocalFiles::State {
             entry.mtime=static_cast<std::int64_t>(st.st_mtime);
             entry.permissions=static_cast<std::uint32_t>(st.st_mode&07777);
             entry.is_directory=S_ISDIR(st.st_mode); entry.is_symlink=S_ISLNK(st.st_mode);
+            entry.is_regular=S_ISREG(st.st_mode);
             out.entries.push_back(std::move(entry));
         }
         std::sort(out.entries.begin(),out.entries.end(),[](const auto& a,const auto& b) {
@@ -199,11 +197,12 @@ struct LocalFiles::State {
             const auto status=item.symlink_status(item_ec);
             if(item_ec) { if(item_ec==std::errc::no_such_file_or_directory) continue; filesystem_error(item_ec); }
             LocalFileEntry entry;
-            entry.name=narrow(item.path().filename());
+            entry.name=utf8_path(item.path().filename());
             if(entry.name.empty()) continue;
             entry.path=out.path/item.path().filename();
             entry.is_symlink=std::filesystem::is_symlink(status);
             entry.is_directory=std::filesystem::is_directory(status);
+            entry.is_regular=std::filesystem::is_regular_file(status);
             entry.permissions=entry.is_symlink?0777u:entry.is_directory?0755u:0644u;
             if(!entry.is_symlink) {
                 const auto size=std::filesystem::file_size(item.path(),item_ec);
@@ -272,7 +271,7 @@ struct LocalFiles::State {
         }
 #else
         Target target(c.path);
-        const auto source=target.parent/target.leaf;
+        const auto source=target.parent/native_file_path(target.leaf);
         switch(c.operation) {
         case LocalFileOperation::Mkdir: {
             std::error_code ec;
@@ -284,7 +283,7 @@ struct LocalFiles::State {
         }
         case LocalFileOperation::Rename: {
             Target destination(c.destination);
-            const auto target_path=destination.parent/destination.leaf;
+            const auto target_path=destination.parent/native_file_path(destination.leaf);
             const auto from=source.native(), to=target_path.native();
             // No MOVEFILE_REPLACE_EXISTING: an existing destination is never overwritten.
             if(!::MoveFileExW(from.c_str(),to.c_str(),0)) win_error(::GetLastError());

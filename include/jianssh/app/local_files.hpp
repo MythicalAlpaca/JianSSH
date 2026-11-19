@@ -19,8 +19,7 @@ struct LocalFileEntry {
     std::uint64_t size = 0;
     std::int64_t mtime = 0; // Unix seconds, from lstat (the link itself).
     std::uint32_t permissions = 0; // POSIX mode bits, including special bits.
-    bool is_directory = false;
-    bool is_symlink = false;
+    bool is_directory = false, is_symlink = false, is_regular = false;
 };
 struct LocalFilesSnapshot {
     std::filesystem::path path;

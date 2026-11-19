@@ -1,6 +1,7 @@
 #include <jianssh/net/ssh_session.hpp>
 #include <libssh2.h>
 #include <libssh2_sftp.h>
+#include "jianssh/app/file_paths.hpp"
 #include <unordered_set>
 #include <sys/stat.h>
 #include <limits>
@@ -686,12 +687,23 @@ struct SshSession::Impl {
     }
     bool task_rc(int rc, const char* what) {
         if (rc == LIBSSH2_ERROR_EAGAIN) return false;
-        if (rc < 0) fail(ErrorCode::Protocol, std::string(what) + "失败（文件传输状态 " +
-            std::to_string(sftp ? libssh2_sftp_last_error(sftp) : 0) + ")", rc);
+        if (rc < 0) {
+            const auto status=sftp&&rc==LIBSSH2_ERROR_SFTP_PROTOCOL?libssh2_sftp_last_error(sftp):0;
+            const char* detail=nullptr;
+            switch(status) {
+            case LIBSSH2_FX_NO_SUCH_FILE: case LIBSSH2_FX_NO_SUCH_PATH: detail="路径不存在"; break;
+            case LIBSSH2_FX_PERMISSION_DENIED: detail="权限不足"; break;
+            case LIBSSH2_FX_FILE_ALREADY_EXISTS: detail="目标已存在"; break;
+            case LIBSSH2_FX_OP_UNSUPPORTED: detail="服务器不支持此操作"; break;
+            }
+            fail(ErrorCode::Protocol,std::string(what)+"失败（"+
+                (detail?std::string(detail):status?"SFTP 状态 "+std::to_string(status):"错误代码 "+std::to_string(rc))+"）",rc);
+        }
         return true;
     }
     FileInfo file_info(std::string name, const LIBSSH2_SFTP_ATTRIBUTES& a) {
-        return {std::move(name), a.filesize, a.mtime, a.permissions};
+        return {std::move(name), a.flags&LIBSSH2_SFTP_ATTR_SIZE?a.filesize:0,
+            a.flags&LIBSSH2_SFTP_ATTR_ACMODTIME?a.mtime:0, a.flags&LIBSSH2_SFTP_ATTR_PERMISSIONS?a.permissions:0};
     }
     void finish_job(Job& j, TaskState state, std::string error = {}) {
         j.result.state = state; j.result.error = std::move(error); j.finishing = true;
@@ -818,11 +830,20 @@ struct SshSession::Impl {
                 j.result.entries.push_back(file_info(r.remote_path, j.attrs)); finish_job(j, TaskState::Succeeded); return true;
             }
             if (r.kind == TaskKind::List) {
+                if (j.phase==0) {
+                    char path[16384];
+                    int n=libssh2_sftp_realpath(sftp,r.remote_path.c_str(),path,sizeof(path));
+                    if (!task_rc(n,"解析远端目录")) return false;
+                    if (!n||path[0]!='/'||std::memchr(path,0,n)) fail(ErrorCode::Protocol,"服务器返回的远端路径无效");
+                    j.result.listed_path.assign(path,n);
+                    j.phase=1; return true;
+                }
                 if (!j.handle) {
-                    j.handle = libssh2_sftp_opendir(sftp, r.remote_path.c_str());
+                    j.handle = libssh2_sftp_opendir(sftp, j.result.listed_path.c_str());
                     if (!j.handle) { task_rc(libssh2_session_last_errno(session), "打开远端目录"); return false; }
                     return true;
                 }
+                j.attrs={};
                 char name[4096]; int n = libssh2_sftp_readdir(j.handle, name, sizeof(name), &j.attrs);
                 if (n == LIBSSH2_ERROR_EAGAIN) return false;
                 task_rc(n, "读取远端目录");
@@ -832,8 +853,8 @@ struct SshSession::Impl {
                     if (entry == "." || entry == "..") return true;
                     if (entry.find('/') != std::string::npos || entry.find('\0') != std::string::npos)
                         fail(ErrorCode::Protocol, "远端目录名称不安全");
-                    if (j.result.entries.size() >= 4096) fail(ErrorCode::Protocol, "目录项数量超过上限");
-                    j.result.entries.push_back(file_info(std::string(name, n), j.attrs)); publish_job(j);
+                    if (j.result.entries.size() >= 4096) { j.result.listing_truncated=true; finish_job(j,TaskState::Succeeded); }
+                    else j.result.entries.push_back(file_info(std::move(entry), j.attrs));
                 }
                 return true;
             }
@@ -841,7 +862,7 @@ struct SshSession::Impl {
             if (j.phase == 0) {
                 if (upload) {
 #ifdef _WIN32
-                    const std::filesystem::path source_path(r.local_path);
+                    const auto source_path=app::native_file_path(r.local_path);
                     j.fd = ::_wopen(source_path.c_str(), _O_RDONLY | _O_BINARY | _O_NOINHERIT);
                     if (j.fd < 0 || ::_fstat64(j.fd, &j.source) || !(j.source.st_mode & _S_IFREG))
                         fail(ErrorCode::Protocol, "上传源必须是可读的普通文件");
@@ -854,7 +875,7 @@ struct SshSession::Impl {
 #endif
                 } else {
 #ifdef _WIN32
-                    const std::filesystem::path local(r.local_path);
+                    const auto local=app::native_file_path(r.local_path);
                     std::error_code ec;
                     const auto parent = std::filesystem::canonical(local.parent_path(), ec);
                     if (ec || !std::filesystem::is_directory(parent))
@@ -863,18 +884,23 @@ struct SshSession::Impl {
                     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
                         fail(ErrorCode::Protocol, "下载目录不能是重解析点");
                     j.local_directory = parent;
-                    j.local_name = local.filename().string();
-                    if (j.local_name.empty() || j.local_name == "." || j.local_name == "..")
+                    j.local_name = app::utf8_path(local.filename());
+                    if (!app::valid_file_leaf(j.local_name,true))
                         fail(ErrorCode::Protocol, "下载路径包含有歧义的组成部分");
                     unsigned char random[16];
                     if (!fill_random(random, sizeof(random))) fail(ErrorCode::Internal, "无法生成下载临时文件名");
-                    j.temp = j.local_name + ".jianssh-";
+                    j.temp = ".jianssh-";
                     constexpr char hex[] = "0123456789abcdef";
                     for (auto byte : random) { j.temp += hex[byte >> 4]; j.temp += hex[byte & 15]; }
                     const auto temp_path = parent / j.temp;
-                    j.fd = ::_wopen(temp_path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
-                    if (j.fd < 0) fail(ErrorCode::Protocol, "无法创建下载临时文件", errno);
+                    // Publish using this exact handle instead of reopening
+                    // its pathname after verification.
+                    HANDLE file=::CreateFileW(temp_path.c_str(),GENERIC_WRITE|DELETE,FILE_SHARE_READ,
+                        nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+                    if (file==INVALID_HANDLE_VALUE) fail(ErrorCode::Protocol,"无法创建下载临时文件",static_cast<int>(::GetLastError()));
                     j.temp_created = true;
+                    j.fd=::_open_osfhandle(reinterpret_cast<intptr_t>(file),_O_WRONLY|_O_BINARY|_O_NOINHERIT);
+                    if(j.fd<0){::CloseHandle(file);fail(ErrorCode::Protocol,"无法打开下载临时文件",errno);}
 #else
                     // Pin every path component with no-follow dirfds. Ancestor
                     // symlink substitution cannot redirect writes/publication.
@@ -896,7 +922,7 @@ struct SshSession::Impl {
                         fail(ErrorCode::Protocol, "下载目录必须属于当前用户，且组和其他用户不可写");
                     unsigned char random[16];
                     if (!fill_random(random, sizeof(random))) fail(ErrorCode::Internal, "无法生成下载临时文件名");
-                    j.temp = j.local_name + ".jianssh-";
+                    j.temp = ".jianssh-";
                     constexpr char hex[] = "0123456789abcdef";
                     for (auto byte : random) { j.temp += hex[byte >> 4]; j.temp += hex[byte & 15]; }
                     j.fd = ::openat(j.dirfd, j.temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -907,7 +933,8 @@ struct SshSession::Impl {
                 if (upload) {
                     unsigned char random[16];
                     if (!fill_random(random, sizeof(random))) fail(ErrorCode::Internal, "无法生成上传临时文件名");
-                    j.temp = r.remote_path + ".jianssh-";
+                    const auto slash=r.remote_path.rfind('/');
+                    j.temp = (slash==std::string::npos?std::string{}:r.remote_path.substr(0,slash+1)) + ".jianssh-";
                     constexpr char hex[] = "0123456789abcdef";
                     for (auto byte : random) { j.temp += hex[byte >> 4]; j.temp += hex[byte & 15]; }
                 }
@@ -923,6 +950,8 @@ struct SshSession::Impl {
             if (j.phase == 2) {
                 if (!task_rc(libssh2_sftp_fstat(j.handle, &j.attrs), "读取传输文件状态")) return false;
                 if (!upload) {
+                    if (!(j.attrs.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) || !LIBSSH2_SFTP_S_ISREG(j.attrs.permissions))
+                        fail(ErrorCode::Protocol, "下载源必须是普通文件");
                     if (!(j.attrs.flags & LIBSSH2_SFTP_ATTR_SIZE) || !(j.attrs.flags & LIBSSH2_SFTP_ATTR_ACMODTIME))
                         fail(ErrorCode::Protocol, "下载源缺少大小或修改时间");
                     j.result.total = j.attrs.filesize;
@@ -961,7 +990,7 @@ struct SshSession::Impl {
 #ifdef _WIN32
                     struct _stat64 now{};
                     struct _stat64 path_now{};
-                    if (::_stat64(r.local_path.c_str(), &path_now) || ::_fstat64(j.fd, &now) ||
+                    if (::_wstat64(app::native_file_path(r.local_path).c_str(), &path_now) || ::_fstat64(j.fd, &now) ||
                         now.st_size != j.source.st_size || now.st_mtime != j.source.st_mtime ||
                         path_now.st_size != j.source.st_size || path_now.st_mtime != j.source.st_mtime)
                         fail(ErrorCode::Protocol, "上传源文件在传输过程中发生变化");
@@ -1012,10 +1041,18 @@ struct SshSession::Impl {
                 struct _stat64 held{};
                 if (::_fstat64(j.fd, &held) || static_cast<std::uint64_t>(held.st_size) != j.result.total)
                     fail(ErrorCode::Protocol, "发布前下载临时文件发生变化");
-                const auto temp_path = j.local_directory / j.temp;
-                const auto target_path = j.local_directory / j.local_name;
-                const DWORD flags = r.overwrite ? MOVEFILE_REPLACE_EXISTING : 0;
-                if (!::MoveFileExW(temp_path.c_str(), target_path.c_str(), flags))
+                const auto target_path = j.local_directory / app::native_file_path(j.local_name);
+                const auto& name=target_path.native();
+                const auto bytes=name.size()*sizeof(wchar_t);
+                const auto length=sizeof(FILE_RENAME_INFO)+bytes;
+                auto storage=std::make_unique<std::byte[]>(length);
+                auto* rename=reinterpret_cast<FILE_RENAME_INFO*>(storage.get());
+                rename->ReplaceIfExists=r.overwrite;
+                rename->RootDirectory=nullptr;
+                rename->FileNameLength=static_cast<DWORD>(bytes);
+                std::memcpy(storage.get()+offsetof(FILE_RENAME_INFO,FileName),name.data(),bytes);
+                const HANDLE pinned=reinterpret_cast<HANDLE>(::_get_osfhandle(j.fd));
+                if (!::SetFileInformationByHandle(pinned,FileRenameInfo,rename,static_cast<DWORD>(length)))
                     fail(ErrorCode::Protocol, "下载目标冲突或发布失败", static_cast<int>(::GetLastError()));
                 j.published = true;
 #else

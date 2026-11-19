@@ -3,6 +3,7 @@
 #include "jianssh/app/terminal.hpp"
 #include "jianssh/app/credential_service.hpp"
 #include "jianssh/app/local_files.hpp"
+#include "jianssh/app/file_paths.hpp"
 #include "jianssh/metrics/collector.hpp"
 #include "jianssh/net/ssh_session.hpp"
 #include "jianssh/net/serial_session.hpp"
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <map>
 #include <set>
+#include <tuple>
 #include <sys/stat.h>
 
 #ifndef S_ISLNK
@@ -44,8 +46,8 @@ struct WorkspaceController::Impl {
  };
  struct TrustCommit{std::uint64_t session,request;};
  enum class JobKind{List,Transfer,Operation,Monitor};
- struct Job{JobKind kind;std::uint64_t generation{},transfer{};};
- struct LocalJob{std::uint64_t session,generation;bool listing;};
+  struct Job{JobKind kind;std::uint64_t generation{},transfer{};std::string path;};
+  struct LocalJob{std::uint64_t session,generation;bool listing;std::string path;};
  enum class CredentialJobKind{Load,Store,Erase,MutationErase};
  struct CredentialJob{CredentialJobKind kind;std::uint64_t session{},epoch{},mutation{};std::int64_t host_id{};};
  struct Mutation{Host host;bool remove=false;std::size_t remaining{};bool failed=false;};
@@ -55,7 +57,8 @@ struct WorkspaceController::Impl {
  std::map<std::pair<std::uint64_t,std::uint64_t>,Job> jobs;
  std::map<LocalCommandId,LocalJob> local_jobs;
  std::map<std::pair<std::uint64_t,bool>,std::uint64_t> generations;
- std::map<std::uint64_t,std::pair<std::uint64_t,std::uint64_t>> transfer_jobs;
+  std::map<std::uint64_t,std::pair<std::uint64_t,std::uint64_t>> transfer_jobs;
+  std::set<std::tuple<std::uint64_t,bool,std::string>> pending_refresh;
  std::map<CredentialCommandId,CredentialJob> credential_jobs;
  std::map<std::uint64_t,Mutation> mutations;
  struct PendingConnect { ConnectRequest request; CredentialSecret secret; };
@@ -79,7 +82,7 @@ struct WorkspaceController::Impl {
    if(s->serial)s->serial->disconnect();else s->ssh->disconnect();if(!s->pending_input.empty())view.notice="会话已关闭，未发送输入已清除";wipe(s->pending_input);
    {
     for(auto i=lookups.begin();i!=lookups.end();)if(i->second==id)i=lookups.erase(i);else ++i;
-    for(auto&[key,j]:jobs)if(key.first==id&&j.kind==JobKind::Transfer)finish_transfer(j.transfer,TransferState::Cancelled,"会话已关闭");
+    for(auto&t:view.transfers)if(t.session_id==id&&transfer_active(t.state))finish_transfer(t.id,TransferState::Cancelled,"会话已关闭");
     std::erase_if(jobs,[id](const auto&entry){return entry.first.first==id;});
     std::erase_if(local_jobs,[id](const auto&entry){return entry.second.session==id;});
     std::erase_if(generations,[id](const auto&entry){return entry.first.first==id;});
@@ -93,8 +96,14 @@ struct WorkspaceController::Impl {
   }}};
   cb.setting=[this](WorkspaceSettings s){view.settings=s;};
   cb.file_list=[this](std::uint64_t id,bool remote,std::string p){list(id,remote,std::move(p));};
-  cb.file_transfer=[this](std::uint64_t id,bool upload,std::string source,std::string dest){transfer(id,upload,std::move(source),std::move(dest));};
-  cb.file_cancel=[this](std::uint64_t id){auto it=transfer_jobs.find(id);if(it!=transfer_jobs.end())if(auto*s=find(it->second.first))s->ssh->cancel_task(it->second.second);};
+   cb.file_transfer=[this](std::uint64_t id,bool upload,std::string source,std::string dest){return transfer(id,upload,std::move(source),std::move(dest));};
+   cb.file_cancel=[this](std::uint64_t id){for(auto&t:view.transfers)if(t.id==id&&transfer_active(t.state)){
+    auto it=transfer_jobs.find(id);
+    if(it==transfer_jobs.end())finish_transfer(id,TransferState::Cancelled,"任务已取消");
+    else if(auto*s=find(it->second.first);s&&s->ssh->cancel_task(it->second.second))t.cancel_requested=true;
+    break;
+   }};
+   cb.file_clear_completed=[this](std::uint64_t id){std::erase_if(view.transfers,[id](const auto& t){return t.session_id==id&&!transfer_active(t.state);});};
   cb.file_operation=[this](FileOperationRequest r){operation(std::move(r));};
   cb.monitor=[this](std::uint64_t id,bool enabled){if(auto*s=find(id);s&&s->ssh){s->monitor=enabled;s->next_sample=metrics::Clock::now();if(!enabled&&s->monitor_task)s->ssh->cancel_task(s->monitor_task);}};
  }
@@ -171,7 +180,7 @@ struct WorkspaceController::Impl {
   wipe(r.password);if(retained&&touch_policy)policies[r.host.id]=r.policy;
   sessions.push_back(std::move(s));
  }
- FilePane& pane(std::uint64_t id,bool remote){for(auto&p:view.file_panes)if(p.session_id==id&&p.remote==remote)return p;view.file_panes.push_back({id,remote,false,{},{},{}});return view.file_panes.back();}
+  FilePane& pane(std::uint64_t id,bool remote){for(auto&p:view.file_panes)if(p.session_id==id&&p.remote==remote)return p;FilePane p;p.session_id=id;p.remote=remote;view.file_panes.push_back(std::move(p));return view.file_panes.back();}
  std::string local_path(std::string p){
 #ifdef _WIN32
   if(p=="."||p.empty()){
@@ -181,12 +190,12 @@ struct WorkspaceController::Impl {
    if(auto*rest=std::getenv("HOMEPATH");rest&&*rest)combined+=rest;
    if(!combined.empty())return combined;
    std::error_code ec;auto cwd=std::filesystem::current_path(ec);
-   if(!ec)return cwd.string();
+   if(!ec)return utf8_path(cwd);
    return "C:\\";
   }
   if(p=="/"||p=="\\"){
    std::error_code ec;auto root=std::filesystem::current_path(ec).root_path();
-   if(!ec&&!root.empty())return root.string();
+   if(!ec&&!root.empty())return utf8_path(root);
   }
   return p;
 #else
@@ -194,18 +203,47 @@ struct WorkspaceController::Impl {
   return p;
 #endif
  }
- void list(std::uint64_t id,bool remote,std::string p){auto*s=find(id);if(!s||!s->ssh||shutting_down)return;auto generation=++generations[{id,remote}];auto&v=pane(id,remote);v.path=remote?(p.empty()?".":p):local_path(std::move(p));v.loading=true;v.error.clear();
-  if(remote){net::TaskRequest r;r.kind=net::TaskKind::List;r.remote_path=v.path;auto t=s->ssh->submit_task(std::move(r));if(t)jobs[{id,t}]={JobKind::List,generation,0};else{v.loading=false;v.error="远端未连接或任务队列已满";}}
-  else{auto t=local.list(v.path);if(t)local_jobs[t]={id,generation,true};else{v.loading=false;v.error="本地文件队列繁忙";}}
+ void list(std::uint64_t id,bool remote,std::string p){auto*s=find(id);if(!s||!s->ssh||s->closing||shutting_down)return;auto generation=++generations[{id,remote}];auto&v=pane(id,remote);v.requested_path=remote?(p.empty()?".":p):local_path(std::move(p));v.loading=true;v.error.clear();
+  if(remote){net::TaskRequest r;r.kind=net::TaskKind::List;r.remote_path=v.requested_path;auto t=s->ssh->submit_task(std::move(r));if(t)jobs[{id,t}]={JobKind::List,generation,0,{}};else{v.loading=false;v.error="远端未连接或任务队列已满";}}
+  else{auto t=local.list(native_file_path(v.requested_path));if(t)local_jobs[t]={id,generation,true,{}};else{v.loading=false;v.error="本地文件队列繁忙";}}
  }
- void refresh(std::uint64_t id){std::string lp,rp;for(auto&p:view.file_panes)if(p.session_id==id)(p.remote?rp:lp)=p.path;if(!lp.empty())list(id,false,lp);if(!rp.empty())list(id,true,rp);}
+ void refresh_changed(std::uint64_t id,bool remote,const std::string& changed_path){
+  pending_refresh.emplace(id,remote,file_parent(changed_path,remote));
+ }
+ void operation_result(std::uint64_t id,bool remote,const std::string& path,std::string error){
+  auto& p=pane(id,remote);p.operation_failed=!error.empty();
+  p.operation_message=(p.operation_failed?error:"操作成功")+" · "+path;
+  if(!p.operation_failed)refresh_changed(id,remote,path);
+ }
  void finish_transfer(std::uint64_t id,TransferState state,std::string error){for(auto&t:view.transfers)if(t.id==id){t.state=state;t.error=std::move(error);break;}transfer_jobs.erase(id);}
- void transfer(std::uint64_t id,bool upload,std::string source,std::string dest){auto*s=find(id);if(!s||!s->ssh||shutting_down)return;if(view.transfers.size()>=256){auto i=std::find_if(view.transfers.begin(),view.transfers.end(),[](auto&t){return t.state==TransferState::Completed||t.state==TransferState::Failed||t.state==TransferState::Cancelled;});if(i!=view.transfers.end())view.transfers.erase(i);else{view.notice="传输队列已满";return;}}
-  net::TaskRequest r;r.kind=upload?net::TaskKind::Upload:net::TaskKind::Download;r.local_path=upload?source:dest;r.remote_path=upload?dest:source;r.overwrite=false;auto task=s->ssh->submit_task(std::move(r));if(!task){view.notice="传输任务未接受，连接断开或队列繁忙";return;}auto tid=next_transfer++;TransferTask t;t.id=tid;t.session_id=id;t.upload=upload;t.source=std::move(source);t.destination=std::move(dest);view.transfers.push_back(std::move(t));jobs[{id,task}]={JobKind::Transfer,0,tid};transfer_jobs[tid]={id,task};
+ bool transfer(std::uint64_t id,bool upload,std::string source,std::string dest){auto*s=find(id);if(!s||!s->ssh||s->closing||shutting_down||s->previous!=net::SessionState::Connected)return false;
+  if(std::any_of(view.transfers.begin(),view.transfers.end(),[&](const auto& t){return t.session_id==id&&t.upload==upload&&transfer_active(t.state)&&t.source==source&&t.destination==dest;}))return false;
+  if(view.transfers.size()>=256){auto i=std::find_if(view.transfers.begin(),view.transfers.end(),[](auto&t){return !transfer_active(t.state);});if(i!=view.transfers.end())view.transfers.erase(i);else return false;}
+  TransferTask t;t.id=next_transfer++;t.session_id=id;t.upload=upload;t.source=std::move(source);t.destination=std::move(dest);view.transfers.push_back(std::move(t));
+  return true;
+ }
+ bool dispatch_transfers(Session& s,net::SessionState state){
+  bool changed=false;
+  if(state!=net::SessionState::Connected){
+   if(state==net::SessionState::Disconnected||state==net::SessionState::Failed)
+    for(auto&t:view.transfers)if(t.session_id==s.id&&transfer_active(t.state)&&!transfer_jobs.count(t.id)){finish_transfer(t.id,TransferState::Failed,"SSH 连接已断开");changed=true;}
+   return changed;
+  }
+  if(shutting_down||std::any_of(transfer_jobs.begin(),transfer_jobs.end(),[&](const auto& job){return job.second.first==s.id;}))return false;
+  for(const auto& t:view.transfers)if(t.session_id==s.id&&t.state==TransferState::Queued){
+   net::TaskRequest r;r.kind=t.upload?net::TaskKind::Upload:net::TaskKind::Download;r.local_path=t.upload?t.source:t.destination;r.remote_path=t.upload?t.destination:t.source;
+   auto valid=[](const std::string& p){return !p.empty()&&p.size()<=16384&&p.find('\0')==std::string::npos;};
+   if(!valid(r.local_path)||!valid(r.remote_path)||!native_file_path(r.local_path).is_absolute()||r.local_path.back()=='/'){
+    finish_transfer(t.id,TransferState::Failed,"文件路径无效或过长");changed=true;continue;
+   }
+   auto task=s.ssh->submit_task(std::move(r));if(task){jobs[{s.id,task}]={JobKind::Transfer,0,t.id,{}};transfer_jobs[t.id]={s.id,task};changed=true;}
+   break;
+  }
+  return changed;
  }
  void operation(FileOperationRequest r){auto*s=find(r.session_id);if(!s||!s->ssh||shutting_down)return;if(r.recursive){view.notice="不允许递归删除";return;}
-  if(r.remote){net::TaskRequest t;t.remote_path=r.path;t.destination_path=r.target;t.permissions=r.permissions;t.overwrite=false;t.kind=r.operation==FileOperation::Mkdir?net::TaskKind::Mkdir:r.operation==FileOperation::Rename?net::TaskKind::Rename:r.operation==FileOperation::Delete?net::TaskKind::Remove:net::TaskKind::Chmod;auto id=s->ssh->submit_task(std::move(t));if(id)jobs[{r.session_id,id}]={JobKind::Operation,0,0};else view.notice="远端文件操作未接受";}
-  else{LocalCommandId id=0;switch(r.operation){case FileOperation::Mkdir:id=local.mkdir(r.path);break;case FileOperation::Rename:id=local.rename(r.path,r.target);break;case FileOperation::Delete:id=local.remove_file(r.path);break;case FileOperation::Chmod:id=local.chmod(r.path,r.permissions);break;}if(id)local_jobs[id]={r.session_id,0,false};else view.notice="本地文件操作队列繁忙";}
+  if(r.remote){net::TaskRequest t;t.remote_path=r.path;t.destination_path=r.target;t.permissions=r.permissions;t.overwrite=false;t.kind=r.operation==FileOperation::Mkdir?net::TaskKind::Mkdir:r.operation==FileOperation::Rename?net::TaskKind::Rename:r.operation==FileOperation::Delete?net::TaskKind::Remove:net::TaskKind::Chmod;auto id=s->ssh->submit_task(std::move(t));if(id)jobs[{r.session_id,id}]={JobKind::Operation,0,0,r.path};else operation_result(r.session_id,true,r.path,"远端文件操作未接受");}
+  else{LocalCommandId id=0;const auto path=native_file_path(r.path);switch(r.operation){case FileOperation::Mkdir:id=local.mkdir(path);break;case FileOperation::Rename:id=local.rename(path,native_file_path(r.target));break;case FileOperation::Delete:id=local.remove_file(path);break;case FileOperation::Chmod:id=local.chmod(path,r.permissions);break;}if(id)local_jobs[id]={r.session_id,0,false,r.path};else operation_result(r.session_id,false,r.path,"本地文件操作队列繁忙");}
  }
  void credentials_tick(){
   auto v=credentials.snapshot();
@@ -221,9 +259,9 @@ struct WorkspaceController::Impl {
   view.connection_settings.clear();for(auto&h:view.hosts){if(h.connection_type!="ssh")continue;ConnectionSettings s;s.host_id=h.id;auto p=policies.find(h.id);s.policy=p==policies.end()?RememberPolicy::Never:p->second;for(auto&m:v->entries)if(m.ref.host_id==h.id&&m.ref.credential_id==ref(h,m.ref.kind).credential_id){s.has_saved_password=true;if(p==policies.end())s.policy=static_cast<RememberPolicy>(m.policy);}view.connection_settings.push_back(s);}
  }
  void task_result(Session&s,const net::TaskSnapshot&t,bool complete){auto it=jobs.find({s.id,t.id});if(it==jobs.end())return;auto j=it->second;
-  if(j.kind==JobKind::Transfer){for(auto&v:view.transfers)if(v.id==j.transfer){v.completed_bytes=t.transferred;v.total_bytes=t.total;if(!complete)v.state=t.state==net::TaskState::Running?TransferState::Running:TransferState::Queued;break;}if(complete){finish_transfer(j.transfer,t.state==net::TaskState::Succeeded?TransferState::Completed:t.state==net::TaskState::Cancelled?TransferState::Cancelled:TransferState::Failed,t.error);refresh(s.id);}}
-  else if(complete&&j.kind==JobKind::List&&generations[{s.id,true}]==j.generation){auto&p=pane(s.id,true);p.loading=false;p.error=t.error;p.entries.clear();if(t.state==net::TaskState::Succeeded)for(auto&e:t.entries){if(e.name=="."||e.name=="..")continue;p.entries.push_back({e.name,e.size,static_cast<unsigned>(e.permissions),S_ISDIR(e.permissions),S_ISLNK(e.permissions)});}}
-  else if(complete&&j.kind==JobKind::Operation){if(!t.error.empty())view.notice=t.error;refresh(s.id);}
+  if(j.kind==JobKind::Transfer){for(auto&v:view.transfers)if(v.id==j.transfer){v.completed_bytes=t.transferred;v.total_bytes=t.total;if(!complete)v.state=t.state==net::TaskState::Running?TransferState::Running:TransferState::Queued;else if(t.state==net::TaskState::Succeeded)refresh_changed(s.id,v.upload,v.destination);break;}if(complete)finish_transfer(j.transfer,t.state==net::TaskState::Succeeded?TransferState::Completed:t.state==net::TaskState::Cancelled?TransferState::Cancelled:TransferState::Failed,t.error);}
+  else if(complete&&j.kind==JobKind::List&&generations[{s.id,true}]==j.generation){auto&p=pane(s.id,true);p.loading=false;p.error=t.error;if(t.state==net::TaskState::Succeeded){p.path=t.listed_path;p.truncated=t.listing_truncated;++p.revision;p.entries.clear();for(auto&e:t.entries)p.entries.push_back({e.name,e.size,static_cast<std::int64_t>(e.mtime),static_cast<unsigned>(e.permissions),S_ISDIR(e.permissions),S_ISLNK(e.permissions),S_ISREG(e.permissions)});}}
+  else if(complete&&j.kind==JobKind::Operation){operation_result(s.id,true,j.path,t.error);}
   else if(complete&&j.kind==JobKind::Monitor){auto now=metrics::Clock::now();bool ok=t.state==net::TaskState::Succeeded&&t.exit_status==0&&!t.output_truncated;if(ok)ok=s.collector.consume(t.stdout_text,now);else s.collector.fail(t.error.empty()?"采集执行失败或输出被截断":t.error,now);if(ok){auto snap=s.collector.snapshot();std::optional<double>d;for(auto&disk:snap.disks)if(disk.percent&&(!d||*disk.percent>*d))d=disk.percent;s.disk_history[seconds(snap.sampled_at)]=d;while(!s.disk_history.empty()&&s.disk_history.begin()->first<seconds(now)-300)s.disk_history.erase(s.disk_history.begin());}else s.disk_history.clear();s.failures=ok?0:std::min(s.failures+1,5);s.monitor_task=0;s.next_sample=now+std::chrono::seconds(s.interval*(1<<s.failures));}
   if(complete)jobs.erase(it);
  }
@@ -236,7 +274,7 @@ struct WorkspaceController::Impl {
   if(serial_discovery){auto task=serial_discovery;bool done=false;{std::lock_guard lock(task->mutex);done=task->done;if(done){view.serial_ports=std::move(task->ports);view.serial_ports_error=std::move(task->error);}}if(done){serial_discovery.reset();view.serial_ports_loading=false;dirty=true;}}
   for(auto&r:hosts.drain_results()){
    auto pending=pending_connections.find(r.command);if(pending!=pending_connections.end()){auto item=std::move(pending->second);pending_connections.erase(pending);if(r.error.empty()&&!shutting_down){auto latest=hosts.snapshot();view.hosts=latest->hosts;item.request.host.id=r.host_id;item.request.save_to_workspace=false;item.request.password.assign(reinterpret_cast<const char*>(item.secret.data()),item.secret.size());item.secret.clear();connect(std::move(item.request));}else view.notice=r.error.empty()?"应用正在关闭，已取消连接":r.error;dirty=true;continue;}if(!r.error.empty()){view.notice=r.error;dirty=true;}auto trust=trust_commits.find(r.command);if(trust!=trust_commits.end()){if(auto*s=find(trust->second.session))s->ssh->answer_host_key(trust->second.request,r.error.empty());if(r.error.empty())view.notice="主机信任已保存";trust_commits.erase(trust);dirty=true;}auto it=lookups.find(r.command);if(it!=lookups.end()){if(auto*s=find(it->second);s&&s->waiting&&!s->credential_wait){s->waiting=false;if(r.error.empty()){if(r.known_host)s->options.expected_host_key=*r.known_host;if(!s->ssh->connect(std::move(s->options))){clear_session_secrets(*s);s->local_error="连接参数无效";}}else{clear_session_secrets(*s);s->local_error=r.error;}}lookups.erase(it);dirty=true;}}
-  for(auto&r:local.drain_results()){auto i=local_jobs.find(r.command);if(i==local_jobs.end())continue;auto j=i->second;local_jobs.erase(i);if(!find(j.session))continue;if(j.listing&&generations[{j.session,false}]==j.generation){auto&p=pane(j.session,false);p.loading=false;p.error=r.error;p.entries.clear();if(r.snapshot){p.path=r.snapshot->path.string();if(r.snapshot->truncated)p.error="目录超过10000项，已截断";for(auto&e:r.snapshot->entries)p.entries.push_back({e.name,e.size,e.permissions,e.is_directory,e.is_symlink});}}else if(!j.listing){if(!r.error.empty())view.notice=r.error;refresh(j.session);}dirty=true;}
+   for(auto&r:local.drain_results()){auto i=local_jobs.find(r.command);if(i==local_jobs.end())continue;auto j=i->second;local_jobs.erase(i);if(!find(j.session))continue;if(j.listing&&generations[{j.session,false}]==j.generation){auto&p=pane(j.session,false);p.loading=false;p.error=r.error;if(r.snapshot&&r.snapshot->ready){p.path=utf8_path(r.snapshot->path);p.truncated=r.snapshot->truncated;++p.revision;p.entries.clear();for(auto&e:r.snapshot->entries)p.entries.push_back({e.name,e.size,e.mtime,e.permissions,e.is_directory,e.is_symlink,e.is_regular});}}else if(!j.listing){operation_result(j.session,false,j.path,r.error);}dirty=true;}
   view.trust.reset();view.sessions.clear();view.metrics.clear();auto now=metrics::Clock::now();
   // Closing sessions are hidden immediately; reap them only after the SSH
   // worker has stopped, avoiding a blocking join in the UI callback.
@@ -257,11 +295,19 @@ struct WorkspaceController::Impl {
     if(state.state==net::SessionState::Failed||state.state==net::SessionState::Disconnected){if(!s->pending_input.empty())view.notice="连接已结束，未发送输入已清除";wipe(s->pending_input);clear_session_secrets(*s);}}
    if(state.state==net::SessionState::Connected&&!s->pending_input.empty()){auto n=s->ssh->write_input(s->pending_input);s->pending_input.erase(0,n);}
    auto out=s->ssh->read_output(128*1024);if(!out.empty()){s->terminal->feed(out);dirty=true;}if(!s->ssh->poll_events().empty())dirty=true;
-   for(auto&t:state.tasks){task_result(*s,t,false);dirty=true;}
-   if(s->monitor&&!s->monitor_task&&state.state==net::SessionState::Connected&&now>=s->next_sample&&!shutting_down){if(s->collector.begin_sample()){net::TaskRequest r;r.kind=net::TaskKind::Exec;r.command=metrics::Collector::script();r.output_limit=metrics::Collector::output_limit;r.timeout=std::chrono::seconds(10);auto id=s->ssh->submit_task(std::move(r));if(id){s->monitor_task=id;jobs[{s->id,id}]={JobKind::Monitor,0,0};}else{s->collector.fail("采集任务队列繁忙",now);s->next_sample=now+std::chrono::seconds(4);}}}
+    for(auto&t:state.tasks){task_result(*s,t,false);dirty=true;}
+    if(s->monitor&&!s->monitor_task&&state.state==net::SessionState::Connected&&now>=s->next_sample&&!shutting_down){if(s->collector.begin_sample()){net::TaskRequest r;r.kind=net::TaskKind::Exec;r.command=metrics::Collector::script();r.output_limit=metrics::Collector::output_limit;r.timeout=std::chrono::seconds(10);auto id=s->ssh->submit_task(std::move(r));if(id){s->monitor_task=id;jobs[{s->id,id}]={JobKind::Monitor,0,0,{}};}else{s->collector.fail("采集任务队列繁忙",now);s->next_sample=now+std::chrono::seconds(4);}}}
    metrics_view(*s,now);SessionView v;v.id=s->id;v.title=s->host.name.empty()?s->host.hostname:s->host.name;v.status=s->credential_wait?"读取已保存凭据":s->waiting?"读取主机信任记录":state_name(state.state);v.terminal=s->terminal;v.error=s->local_error.empty()?state.error.message:s->local_error;v.connected=state.state==net::SessionState::Connected;view.sessions.push_back(std::move(v));
    if(!view.trust&&state.host_key_request){auto&k=*state.host_key_request;TrustRequest t;t.session_id=s->id;t.request_id=k.id;t.host=k.host;t.port=k.port;t.algorithm=k.algorithm;t.fingerprint=k.sha256_fingerprint;view.trust=std::move(t);}
-  }
+   }
+   for(auto it=pending_refresh.begin();it!=pending_refresh.end();){
+    const auto& [id,remote,path]=*it;
+    const auto p=std::find_if(view.file_panes.begin(),view.file_panes.end(),[&](const auto& p){return p.session_id==id&&p.remote==remote;});
+    if(p!=view.file_panes.end()&&p->loading&&p->requested_path==path){++it;continue;}
+    if(p!=view.file_panes.end()&&!p->loading&&p->path==path){list(id,remote,path);dirty=true;}
+    it=pending_refresh.erase(it);
+   }
+   for(auto& s:sessions)if(s->ssh&&!s->closing)dirty=dispatch_transfers(*s,s->previous)||dirty;
   if(shutting_down&&!host_shutdown&&mutations.empty()&&credentials.stopped()){hosts.shutdown();host_shutdown=true;}
   return dirty;
  }

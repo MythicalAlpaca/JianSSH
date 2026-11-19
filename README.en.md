@@ -28,9 +28,10 @@ A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh
 
 ### File transfer
 
-- Dual-pane SFTP browser with clickable parent directory and drag-and-drop transfers between the local and remote panes.
-- Regular-file upload, download, and cancellation, plus mkdir, rename, delete, and chmod.
-- Existing files are not overwritten by default. Recursive transfer/delete, resume, and concurrent transfers are not implemented.
+- Local and remote panes retain their own paths and filters per session. Jump to the home or parent directory, refresh, enter a path, filter by name, or show hidden entries. Sort by name, size, or modification time. Panes stack in narrow windows.
+- Select multiple regular files with Ctrl (or ⌘), Shift, or Select All, then upload/download them. Drag a single file to the other pane or directly onto a directory there. Right-click to copy the full path, rename, delete a file, or change permissions; create directories from the toolbar.
+- The collapsible queue shows byte progress and error details and supports cancellation and clearing finished tasks. It retains up to 256 entries globally, dropping the oldest finished entry first when full. Transfers run in order within each session.
+- Existing files are never overwritten. Recursive transfer/delete, directory deletion, resumable transfers, and concurrent transfers within one session are not supported.
 - Transfer temporary files use `0600` permissions; failures never "roll back" by deleting the destination.
 
 ### Remote monitoring
@@ -53,6 +54,7 @@ A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh
 - Embedded CJK and proportional UI fonts with a macOS-style neutral material, system-blue accent, and rounded controls; system, dark, and light modes.
 - Time-bounded transitions for entry, hover, selection, modal and page changes. Page changes use a quick-out, slow-in two-phase ease. Power saving is enabled by default and rendering is on demand while idle.
 - Supports `--reduced-motion` and an in-app "reduce motion" setting.
+- Active sessions use a compact layout that prioritizes the terminal and SFTP panes. In narrow windows, open device navigation from the session bar. The SFTP transfer queue starts collapsed.
 
 ## Platform support
 

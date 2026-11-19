@@ -45,16 +45,27 @@ struct ConnectRequest {
     // Never store credentials in Host.
     bool save_password = false, use_saved_password = false;
 };
-struct FileEntry { std::string name; std::uint64_t size{}; unsigned permissions{}; bool directory = false, symlink = false; };
+struct FileEntry {
+    std::string name;
+    std::uint64_t size{};
+    std::int64_t mtime{};
+    unsigned permissions{};
+    bool directory = false, symlink = false, regular = false;
+};
 struct FilePane {
-    std::uint64_t session_id{}; bool remote = false, loading = false;
-    std::string path, error; std::vector<FileEntry> entries;
+    std::uint64_t session_id{}, revision{};
+    bool remote = false, loading = false, truncated = false;
+    std::string path, requested_path, error, operation_message;
+    bool operation_failed = false;
+    std::vector<FileEntry> entries;
 };
 enum class TransferState { Queued, Running, Completed, Failed, Cancelled };
+inline bool transfer_active(TransferState state) { return state==TransferState::Queued||state==TransferState::Running; }
 struct TransferTask {
     std::uint64_t id{}, session_id{}, completed_bytes{}, total_bytes{};
     std::string source, destination, error; bool upload = true;
     TransferState state = TransferState::Queued;
+    bool cancel_requested = false;
 };
 enum class FileOperation { Mkdir, Rename, Delete, Chmod };
 struct FileOperationRequest {
@@ -108,8 +119,10 @@ struct WorkspaceCallbacks {
     std::function<void(std::int64_t, RememberPolicy)> save_connection_settings;
     std::function<void(std::uint64_t, bool remote, std::string path)> file_list;
     // Source/destination are full paths; never overwrite an existing destination.
-    std::function<void(std::uint64_t, bool upload, std::string source, std::string destination)> file_transfer;
+    // Returns false for requests not added to the queue (including duplicates).
+    std::function<bool(std::uint64_t, bool upload, std::string source, std::string destination)> file_transfer;
     std::function<void(std::uint64_t)> file_cancel;
+    std::function<void(std::uint64_t)> file_clear_completed;
     std::function<void(FileOperationRequest)> file_operation;
     std::function<void(std::uint64_t, bool enabled)> monitor;
     std::function<void(net::SerialOptions)> serial_connect;

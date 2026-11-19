@@ -39,6 +39,16 @@ struct Layout {
     float central_min = 210.f;
     float column_gap = 14.f;
     float region_min_height = 100.f;
+    // Session chrome is deliberately tighter than the welcome/workspace page.
+    float session_padding = 10.f;
+    float session_spacing = 6.f;
+    float session_sidebar_ratio = 0.15f;
+    float session_sidebar_min = 166.f;
+    float session_sidebar_max = 230.f;
+    float session_sidebar_breakpoint = 960.f;
+    float session_sidebar_min_height = 700.f;
+    float session_sidebar_gap = 10.f;
+    float session_tab_bar_height = 40.f;
 
     // ---- Device list ----------------------------------------------------
     float device_row_height = 54.f;
@@ -74,10 +84,15 @@ struct Layout {
     // ---- Modals ---------------------------------------------------------
     float modal_width_device = 620.f;
     float modal_width_settings = 520.f;
-    float modal_width_delete = 340.f;
-    float modal_width_paste = 620.f;
-    float modal_width_trust = 580.f;
-    float modal_width_operation = 580.f;
+    float modal_width_confirm = 400.f;
+    float modal_width_paste = 540.f;
+    float modal_width_trust = 500.f;
+    float modal_width_operation = 420.f;
+    float confirm_min_width = 270.f;
+    float confirm_viewport_margin = 12.f;
+    float confirm_padding = 14.f;
+    float confirm_footer_gap = 8.f;
+    float confirm_button_min = 88.f;
     float modal_viewport_margin = 32.f;
     float modal_min_width = 280.f;
     // Space reserved outside the scrolling body: window padding, popup title
@@ -88,7 +103,6 @@ struct Layout {
 
     // ---- Files ----------------------------------------------------------
     float file_pane_height = 260.f;
-    float paste_preview_width = 550.f;
     float paste_preview_height = 220.f;
 
     // ---- Metrics --------------------------------------------------------
@@ -133,6 +147,10 @@ inline Regions compute_regions(float width, const Layout& l = layout) {
         r.central = std::max(0.f, width - r.sidebar - r.gaps(l));
     }
     return r;
+}
+
+inline float session_sidebar_width(float width,const Layout& l=layout) {
+    return std::clamp(width*l.session_sidebar_ratio,l.session_sidebar_min,l.session_sidebar_max);
 }
 
 // Height of the region that holds the three columns; the status bar sits

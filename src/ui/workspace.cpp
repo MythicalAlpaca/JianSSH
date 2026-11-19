@@ -5,6 +5,7 @@
 #include "jianssh/ui/system_theme.hpp"
 #include "jianssh/ui/interaction.hpp"
 #include "jianssh/app/terminal.hpp"
+#include "jianssh/app/file_paths.hpp"
 #include <imgui.h>
 #include <atomic>
 #include "key_file_picker.hpp"
@@ -14,9 +15,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -75,10 +78,22 @@ struct Workspace::Impl {
     bool save_to_workspace=false, show_password=false;
     bool has_saved_password=false;
     int view=0;
-    std::array<char,1024> local_path{}, remote_path{}, operation_target{};
-    std::string local_selection, remote_selection;
-    bool local_directory=false, remote_directory=false;
-    std::uint64_t files_session=0;
+    struct BrowserPane {
+        std::array<char,16385> path{};
+        std::array<char,256> filter{};
+        std::string listed_path, anchor, transfer_feedback;
+        std::set<std::string> selection;
+        std::vector<int> rows;
+        std::uint64_t revision{};
+        bool show_hidden=true, rebuild=true, reset_scroll=false;
+        int sort_column=0;
+        bool descending=false;
+    };
+    struct FileBrowser { BrowserPane panes[2]; bool requested[2]{}, show_queue=false; };
+    std::unordered_map<std::uint64_t,FileBrowser> browsers;
+    bool narrow_devices=false;
+    std::array<char,4097> operation_target{};
+    std::string operation_parent;
     app::FileOperationRequest operation;
     bool operation_pending=false;
     std::array<char,16> permissions{};
@@ -186,9 +201,7 @@ struct Workspace::Impl {
     MotionClock::time_point now{};
     bool reduced_motion=false;
     std::string notice_text;
-    std::unordered_map<std::uint64_t,float> progress_shown;
     bool loading_visible=false;
-    bool progress_visible=false;
     // Central page choreography: only one page is drawn at a time; the
     // transition engine fades out the old key, swaps, then settles the new one.
     PageTransition page;
@@ -548,6 +561,43 @@ struct Workspace::Impl {
     void begin_modal_body(float height) {
         ImGui::BeginChild("##弹窗正文",ImVec2(0,height),false);
     }
+    // Confirmation text determines the height. Only oversized content scrolls;
+    // the action row remains outside the scrollable body.
+    float confirmation_width(float content,float limit) const {
+        const float room=ImGui::GetMainViewport()->WorkSize.x-layout.confirm_viewport_margin*2.f;
+        return std::max(1.f,std::min(room,std::clamp(content+layout.confirm_padding*2.f,layout.confirm_min_width,limit)));
+    }
+    void constrain_confirmation(float content,float limit,float alpha) {
+        const auto available=ImGui::GetMainViewport()->WorkSize;
+        const float width=confirmation_width(content,limit);
+        ImGui::SetNextWindowSize(ImVec2(width,0),ImGuiCond_Always);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(width,0),ImVec2(width,std::max(1.f,available.y-layout.confirm_viewport_margin*2.f)));
+        apply_modal_offset(alpha);
+    }
+    void begin_confirmation_body() {
+        const float usable=ImGui::GetMainViewport()->WorkSize.y-layout.confirm_viewport_margin*2.f;
+        const float chrome=ImGui::GetFrameHeight()+layout.confirm_padding*2.f+layout.button_height_large+ImGui::GetStyle().ItemSpacing.y*3.f+2.f;
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0,0),ImVec2(FLT_MAX,std::max(1.f,usable-chrome)));
+        ImGui::BeginChild("##确认正文",ImVec2(ImGui::GetContentRegionAvail().x,0),ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_AlwaysAutoResize);
+    }
+    float confirmation_buttons(const char* first,const char* second=nullptr) const {
+        ImGui::PushStyleColor(ImGuiCol_Separator,tone(fade_color(theme.separator,0.65f)));
+        ImGui::Separator();
+        ImGui::PopStyleColor();
+        const float avail=ImGui::GetContentRegionAvail().x;
+        const float gap=second?layout.confirm_footer_gap:0.f;
+        const int count=second?2:1;
+        const float text_width=std::max(ImGui::CalcTextSize(first).x,second?ImGui::CalcTextSize(second).x:0.f);
+        const float preferred=std::max(layout.confirm_button_min,text_width+ImGui::GetStyle().FramePadding.x*2.f);
+        const float width=std::max(1.f,std::min(preferred,(avail-gap)/count));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.f,(avail-width*count-gap)*0.5f));
+        return width;
+    }
+    void confirmation_note(const char* text,ImU32 color) const {
+        ImGui::PushStyleColor(ImGuiCol_Text,tone(color));
+        ImGui::TextWrapped("%s",text);
+        ImGui::PopStyleColor();
+    }
     void end_modal_body() { ImGui::EndChild(); }
     // Two footer buttons share the row, so a long label can never push the
     // second button outside a narrow popup.
@@ -785,34 +835,42 @@ struct Workspace::Impl {
             ImGui::SameLine();if(button("取消",ImVec2(footer,layout.button_height),"取消连接")) {discard_key_task();clear_connection_secret();ImGui::CloseCurrentPopup();}
             ImGui::EndPopup();
         }
-        constrain_modal(layout.modal_width_delete);
-        apply_modal_offset(a);
+        const std::string close_text="确定关闭「"+close_title+"」的会话？";
+        const char* close_note="关闭后连接和正在进行的传输将被取消。";
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(layout.confirm_padding,layout.confirm_padding));
+        constrain_confirmation(std::max(ImGui::CalcTextSize(close_text.c_str()).x,ImGui::CalcTextSize(close_note).x),layout.modal_width_confirm,a);
         if(ImGui::BeginPopupModal("关闭会话？",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
             clamp_modal_to_viewport();
-            ImGui::TextWrapped("确定关闭「%s」的会话？",close_title.c_str());
-            ImGui::TextWrapped("关闭后连接和正在进行的传输将被取消。");
-            const float footer=footer_pair_width(ImGui::GetContentRegionAvail().x*0.5f);
+            begin_confirmation_body();
+            ImGui::TextWrapped("%s",close_text.c_str());
+            confirmation_note(close_note,theme.muted);
+            end_modal_body();
+            const float footer=confirmation_buttons("确认关闭","取消");
             if(button("确认关闭",ImVec2(footer,layout.button_height),"确认关闭会话",ButtonKind::Danger)) {
                 if(cb.disconnect) cb.disconnect(close_session);
                 close_session=0; ImGui::CloseCurrentPopup();
             }
-            ImGui::SameLine();
+            ImGui::SameLine(0,layout.confirm_footer_gap);
             if(button("取消",ImVec2(footer,layout.button_height),"取消关闭会话")) {close_session=0; ImGui::CloseCurrentPopup();}
             ImGui::EndPopup();
         }
-        constrain_modal(layout.modal_width_delete);
-        apply_modal_offset(a);
+        const std::string delete_text="从设备库删除「"+draft.name+"」？";
+        const char* delete_note="此操作不可撤销；不会自动关闭已有会话。";
+        constrain_confirmation(std::max(ImGui::CalcTextSize(delete_text.c_str()).x,ImGui::CalcTextSize(delete_note).x),layout.modal_width_confirm,a);
         if(ImGui::BeginPopupModal("删除设备？",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
             clamp_modal_to_viewport();
-            ImGui::TextWrapped("从设备库删除「%s」？",draft.name.c_str());
+            begin_confirmation_body();
+            ImGui::TextWrapped("%s",delete_text.c_str());
             ImGui::PushStyleColor(ImGuiCol_Text,tone(theme.muted));
-            ImGui::TextWrapped("此操作不可撤销；不会自动关闭已有会话。");
+            ImGui::TextWrapped("%s",delete_note);
             ImGui::PopStyleColor();
-            const float footer=footer_pair_width(ImGui::GetContentRegionAvail().x*0.5f);
+            end_modal_body();
+            const float footer=confirmation_buttons("确认删除","保留设备");
             if(button("确认删除",ImVec2(footer,layout.button_height),"确认删除",ButtonKind::Danger)&&cb.delete_host) {cb.delete_host(draft.id);ImGui::CloseCurrentPopup();}
-            ImGui::SameLine();if(button("保留设备",ImVec2(footer,layout.button_height),"保留设备"))ImGui::CloseCurrentPopup();
+            ImGui::SameLine(0,layout.confirm_footer_gap);if(button("保留设备",ImVec2(footer,layout.button_height),"保留设备"))ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar();
         constrain_modal(layout.modal_width_settings);
         apply_modal_offset(a);
         if(ImGui::BeginPopupModal("偏好设置",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
@@ -840,30 +898,34 @@ struct Workspace::Impl {
             if(button("完成",ImVec2(100,layout.button_height_small),"完成设置",ButtonKind::Primary))ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
-        constrain_modal(layout.modal_width_paste);
-        apply_modal_offset(a);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(layout.confirm_padding,layout.confirm_padding));
+        constrain_confirmation(paste_error.empty()?420.f:ImGui::CalcTextSize(paste_error.c_str()).x,layout.modal_width_paste,a);
         if(ImGui::BeginPopupModal("确认粘贴到远端",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
             clamp_modal_to_viewport();
             auto target=paste_terminal.lock();
             const app::SessionView* target_session=nullptr;
             for(const auto& s:m.sessions)if(s.id==paste_session&&s.connected&&s.terminal==target)target_session=&s;
-            begin_modal_body(modal_body_height(400));
+            begin_confirmation_body();
             if(!paste_error.empty())ImGui::TextWrapped("%s",paste_error.c_str());
             else {
                 ImGui::TextWrapped("目标：%s",target_session?target_session->title.c_str():"原会话已断开或关闭");
                 const auto lines=1+std::count(paste_text.begin(),paste_text.end(),'\n');
                 ImGui::Text("%zu 字节 / %zu 行 · 上限 64 千字节",paste_text.size(),static_cast<std::size_t>(lines));
-                ImGui::TextColored(tone(theme.warning),"换行可能立即执行命令。请检查来源及全部内容。");
-                const float preview_width=std::max(60.f,std::min(layout.paste_preview_width,ImGui::GetContentRegionAvail().x));
-                const float preview_height=std::max(60.f,std::min(layout.paste_preview_height,ImGui::GetContentRegionAvail().y-58.f));
+                ImGui::PushStyleColor(ImGuiCol_Text,tone(theme.warning));
+                ImGui::TextWrapped("换行可能立即执行命令。请检查来源及全部内容。");
+                ImGui::PopStyleColor();
+                const float preview_width=ImGui::GetContentRegionAvail().x;
+                const float preview_cap=std::max(54.f,std::min(layout.paste_preview_height,ImGui::GetMainViewport()->WorkSize.y*0.30f));
+                const float preview_height=std::clamp(static_cast<float>(lines)*ImGui::GetTextLineHeight()+18.f+ImGui::GetStyle().ScrollbarSize,48.f,preview_cap);
                 ImGui::BeginChild("粘贴预览",ImVec2(preview_width,preview_height),true,ImGuiWindowFlags_HorizontalScrollbar);
                 ImGui::TextUnformatted(paste_text.data(),paste_text.data()+paste_text.size());
                 ImGui::EndChild();
-                label("仅预览，不会自动发送；确认后向原目标提交一次。");
+                ImGui::TextWrapped("仅预览，不会自动发送；确认后向原目标提交一次。");
             }
             end_modal_body();
-            const float footer=footer_pair_width(170);
-            if(paste_error.empty()) {
+            const bool show_send=paste_error.empty();
+            const float footer=show_send?confirmation_buttons("确认，发送一次","取消，不发送"):confirmation_buttons("关闭");
+            if(show_send) {
                 ImGui::BeginDisabled(!target_session||!target);
                 if(button("确认，发送一次",ImVec2(footer,layout.button_height),"确认发送",ButtonKind::Danger)) {
                     // Clear retained payload before sending: no retry or double-submit.
@@ -873,224 +935,362 @@ struct Workspace::Impl {
                     wipe(payload.data(),payload.size());
                     if(paste_error.empty()){restore_terminal_focus=true;ImGui::CloseCurrentPopup();}
                 }
-                ImGui::EndDisabled();ImGui::SameLine();
+                ImGui::EndDisabled();ImGui::SameLine(0,layout.confirm_footer_gap);
             }
-            if(button("取消，不发送",ImVec2(footer,layout.button_height),"取消粘贴")) {clear_paste();restore_terminal_focus=true;ImGui::CloseCurrentPopup();}
+            if(button(show_send?"取消，不发送":"关闭",ImVec2(footer,layout.button_height),"取消粘贴")) {clear_paste();restore_terminal_focus=true;ImGui::CloseCurrentPopup();}
             ImGui::EndPopup();
         }
-        constrain_modal(layout.modal_width_trust);
-        apply_modal_offset(a);
+        constrain_confirmation(m.trust?std::max(360.f,ImGui::CalcTextSize(m.trust->fingerprint.c_str()).x):200.f,layout.modal_width_trust,a);
         if(ImGui::BeginPopupModal("验证服务器身份",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
             clamp_modal_to_viewport();
-            begin_modal_body(modal_body_height(260));
+            begin_confirmation_body();
             if(m.trust) {
                 const auto& t=*m.trust;
-                ImGui::TextColored(tone(theme.warning),"%s",t.mismatch?"警告：服务器密钥与已保存记录不一致":"首次连接 · 请独立核对服务器指纹");
+                ImGui::PushStyleColor(ImGuiCol_Text,tone(theme.warning));
+                ImGui::TextWrapped("%s",t.mismatch?"警告：服务器密钥与已保存记录不一致":"首次连接 · 请独立核对服务器指纹");
+                ImGui::PopStyleColor();
                 ImGui::TextWrapped("%s:%d  /  %s",t.host.c_str(),t.port,t.algorithm.c_str());
                 ImGui::Separator();ImGui::TextWrapped("%s",t.fingerprint.c_str());ImGui::Separator();
                 ImGui::TextWrapped("首次信任无法自动证明服务器身份。请通过管理员或其他可信渠道核对完整 SHA-256 指纹，陌生指纹可能代表中间人攻击。");
                 if(t.mismatch)ImGui::TextWrapped("为保护连接，本界面不允许绕过密钥不匹配。请取消后由可信渠道调查密钥变更。");
             } else label("验证请求已结束。");
             end_modal_body();
-            const float footer=footer_pair_width(210);
             if(m.trust) {
                 const auto& t=*m.trust;
+                const float footer=t.mismatch?confirmation_buttons("拒绝连接"):confirmation_buttons("核对后信任","拒绝连接");
                 if(!t.mismatch) {
-                    if(button("已核对，信任并继续",ImVec2(footer,layout.button_height_large),"信任并继续",ButtonKind::Primary)&&cb.trust) {cb.trust(t.session_id,t.request_id,true);ImGui::CloseCurrentPopup();}
-                    ImGui::SameLine();
+                    if(button("核对后信任",ImVec2(footer,layout.button_height_large),"信任并继续",ButtonKind::Primary)&&cb.trust) {cb.trust(t.session_id,t.request_id,true);ImGui::CloseCurrentPopup();}
+                    ImGui::SameLine(0,layout.confirm_footer_gap);
                 }
-                if(button("拒绝并取消连接",ImVec2(footer,layout.button_height_large),"拒绝连接")&&cb.trust){cb.trust(t.session_id,t.request_id,false);ImGui::CloseCurrentPopup();}
-            } else if(button("关闭",ImVec2(0,layout.button_height),"关闭验证"))ImGui::CloseCurrentPopup();
+                if(button("拒绝连接",ImVec2(footer,layout.button_height_large),"拒绝连接")&&cb.trust){cb.trust(t.session_id,t.request_id,false);ImGui::CloseCurrentPopup();}
+            } else {
+                const float footer=confirmation_buttons("关闭");
+                if(button("关闭",ImVec2(footer,layout.button_height),"关闭验证"))ImGui::CloseCurrentPopup();
+            }
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar();
         ImGui::PopStyleVar();
         if(!ImGui::IsPopupOpen("连接到服务器"))clear_connection_secret();
         if(!ImGui::IsPopupOpen("连接到服务器")&&!ImGui::IsPopupOpen("设备资料"))discard_key_task();
     }
-    static std::string child_path(const std::string& base,const std::string& name) { return base.empty()?name:base+((base.back()=='/'||base.back()=='\\')?"":"/")+name; }
-    static std::string parent_path(const std::string& base) {
-        if(base.empty()||base=="."||base=="/")return ".";
-        std::string s=base;
-        while(s.size()>1&&(s.back()=='/'||s.back()=='\\'))s.pop_back();
-        const auto pos=s.find_last_of("/\\");
-        if(pos==std::string::npos)return ".";
-        if(pos==0)return "/";
-        if(pos==2&&s.size()>2&&s[1]==':')return s.substr(0,3);
-        return s.substr(0,pos);
-    }
     struct DraggedFile {
-        std::uint64_t session{};
-        bool remote=false, directory=false;
-        char name[256]{};
-        char dir[1200]{};
-    };
-    void file_drop_target(std::uint64_t session,bool target_remote,const std::string& target_dir,const app::WorkspaceCallbacks& cb) {
+        std::uint64_t session{}; bool remote=false;
+        std::string name, dir;
+    } dragged_file;
+    void file_drop_target(std::uint64_t session,bool target_remote,const std::string& target_dir,BrowserPane& b,const app::WorkspaceCallbacks& cb) {
         if(!ImGui::BeginDragDropTarget())return;
-        if(const ImGuiPayload* payload=ImGui::AcceptDragDropPayload("JIANSSH_FILE")) {
-            if(payload->DataSize==sizeof(DraggedFile)) {
-                const auto* dragged=static_cast<const DraggedFile*>(payload->Data);
-                if(dragged->session==session&&dragged->remote!=target_remote&&!dragged->directory&&cb.file_transfer&&
-                   dragged->name[0]&&std::memchr(dragged->name,0,sizeof(dragged->name))&&std::memchr(dragged->dir,0,sizeof(dragged->dir))) {
-                    cb.file_transfer(session,!dragged->remote,child_path(dragged->dir,dragged->name),child_path(target_dir,dragged->name));
-                }
-            }
+        const auto& drag=dragged_file;
+        if(drag.session==session&&drag.remote!=target_remote&&cb.file_transfer&&
+           app::valid_file_leaf(drag.name,app::windows_file_path(target_remote))) {
+            if(const auto* payload=ImGui::AcceptDragDropPayload("JIANSSH_FILE");payload&&payload->IsDelivery())
+                b.transfer_feedback=cb.file_transfer(session,!drag.remote,app::file_child(drag.dir,drag.name,drag.remote),app::file_child(target_dir,drag.name,target_remote))?"已加入传输队列":"未加入队列：可能已在队列中或队列已满";
         }
         ImGui::EndDragDropTarget();
     }
-    void feature_dialogs(const app::WorkspaceModel&,const app::WorkspaceCallbacks& cb) {
+    void feature_dialogs(const app::WorkspaceModel& m,const app::WorkspaceCallbacks& cb) {
         if(operation_pending){operation_pending=false;ImGui::OpenPopup("确认文件操作");begin_modal();}
         const float a=modal_alpha();
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha,a);
-        constrain_modal(layout.modal_width_operation);
-        apply_modal_offset(a);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(layout.confirm_padding,layout.confirm_padding));
+        const bool deleting=operation.operation==app::FileOperation::Delete;
+        const char* delete_file_note="永久删除选中的文件或链接，不能撤销。";
+        const std::string path_text=std::string(operation.remote?"远端：":"本地：")+operation.path;
+        constrain_confirmation(std::max(ImGui::CalcTextSize(path_text.c_str()).x,deleting?ImGui::CalcTextSize(delete_file_note).x:285.f),layout.modal_width_operation,a);
         if(ImGui::BeginPopupModal("确认文件操作",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
             clamp_modal_to_viewport();
-            begin_modal_body(modal_body_height(150));
-            ImGui::TextWrapped("%s: %s",operation.remote?"远端":"本地",operation.path.c_str());
+            begin_confirmation_body();
+            static const char* action_labels[]={"新建目录","重命名","删除文件","修改权限"};
+            ImGui::TextColored(tone(deleting?theme.danger:theme.accent),"%s",action_labels[static_cast<int>(operation.operation)]);
+            confirmation_note(path_text.c_str(),theme.muted);
             const bool target=operation.operation==app::FileOperation::Mkdir||operation.operation==app::FileOperation::Rename;
-            if(target) {begin_frame_widget("新名称");ImGui::InputText("新名称（单个路径分量）",operation_target.data(),operation_target.size());end_frame_widget("新名称");}
-            if(operation.operation==app::FileOperation::Chmod) {begin_frame_widget("八进制权限");ImGui::InputText("八进制权限",permissions.data(),permissions.size());end_frame_widget("八进制权限");}
-            if(operation.operation==app::FileOperation::Delete)label("永久删除文件；递归删除已禁用。此操作不能撤销。");
+            if(target) {begin_frame_widget("新名称");ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##新名称","输入单个文件或目录名称",operation_target.data(),operation_target.size());end_frame_widget("新名称");}
+            if(operation.operation==app::FileOperation::Chmod) {begin_frame_widget("八进制权限");ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##八进制权限","八进制权限，例如 0644",permissions.data(),permissions.size());end_frame_widget("八进制权限");}
+            if(deleting)confirmation_note(delete_file_note,theme.warning);
+            const bool available=std::any_of(m.sessions.begin(),m.sessions.end(),[&](const auto& s){return s.id==operation.session_id&&(!operation.remote||s.connected);});
+            if(!available)confirmation_note("原会话已关闭或连接已断开",theme.warning);
+            const bool valid_target=!target||app::valid_file_leaf(operation_target.data(),app::windows_file_path(operation.remote));
+            if(!valid_target&&operation_target[0])confirmation_note("名称无效：请输入当前目录下的单个名称",theme.warning);
             end_modal_body();
-            bool valid_target=!target||(operation_target[0]&&std::string(operation_target.data()).find('/')==std::string::npos&&std::string(operation_target.data())!="."&&std::string(operation_target.data())!="..");
             unsigned mode=0;bool valid_mode=true;
             if(operation.operation==app::FileOperation::Chmod){valid_mode=permissions[0]!=0;for(const char* p=permissions.data();*p;++p){if(*p<'0'||*p>'7'){valid_mode=false;break;}mode=mode*8+static_cast<unsigned>(*p-'0');if(mode>07777){valid_mode=false;break;}}}
-            const float footer=footer_pair_width(180);
-            ImGui::BeginDisabled(!valid_target||!valid_mode||!cb.file_operation);
+            const float footer=confirmation_buttons("确认执行","取消");
+            ImGui::BeginDisabled(!available||!valid_target||!valid_mode||!cb.file_operation);
             if(button("确认执行",ImVec2(footer,layout.button_height),"确认执行",operation.operation==app::FileOperation::Delete?ButtonKind::Danger:ButtonKind::Primary)) {
-                operation.permissions=mode;
-                if(target){auto base=operation.path;if(operation.operation==app::FileOperation::Rename){const auto pos=base.rfind('/');base=pos==std::string::npos?".":base.substr(0,pos==0?1:pos);}operation.target=child_path(base,operation_target.data());}
+                operation.permissions=operation.operation==app::FileOperation::Mkdir?0755:mode;
+                if(target)operation.target=app::file_child(operation_parent,operation_target.data(),operation.remote);
                 if(operation.operation==app::FileOperation::Mkdir)operation.path=operation.target;
                 cb.file_operation(operation);ImGui::CloseCurrentPopup();
             }
-            ImGui::EndDisabled();ImGui::SameLine();if(button("取消",ImVec2(footer,layout.button_height),"取消操作"))ImGui::CloseCurrentPopup();ImGui::EndPopup();
+            ImGui::EndDisabled();ImGui::SameLine(0,layout.confirm_footer_gap);if(button("取消",ImVec2(footer,layout.button_height),"取消操作"))ImGui::CloseCurrentPopup();ImGui::EndPopup();
         }
         ImGui::PopStyleVar();
+        ImGui::PopStyleVar();
     }
-    void files(const app::SessionView& s,const app::WorkspaceModel& m,const app::WorkspaceCallbacks& cb) {
-        if(files_session!=s.id) {
-            files_session=s.id;copy(local_path,".");copy(remote_path,".");local_selection.clear();remote_selection.clear();
-            if(cb.file_list){cb.file_list(s.id,false,".");cb.file_list(s.id,true,".");}
+    static std::string file_size(std::uint64_t value) {
+        if(value<1024)return std::to_string(value)+" B";
+        double size=static_cast<double>(value);
+        const char* units[]={"B","KiB","MiB","GiB","TiB","PiB","EiB"};
+        int unit=0;
+        while(size>=1024&&unit<6){size/=1024;++unit;}
+        char text[48];std::snprintf(text,sizeof(text),"%.1f %s",size,units[unit]);return text;
+    }
+    static std::string file_time(std::int64_t value) {
+        if(!value)return "—";
+        const auto t=static_cast<std::time_t>(value);
+        char out[32];const auto* tm=std::localtime(&t);
+        return tm&&std::strftime(out,sizeof(out),"%Y-%m-%d %H:%M",tm)?out:"—";
+    }
+    static std::string fold_ascii(std::string text) {
+        for(char& c:text)if(c>='A'&&c<='Z')c+=('a'-'A');
+        return text;
+    }
+    static std::string show_filename(std::string text) {
+        for(char& c:text)if(static_cast<unsigned char>(c)<32||c==127)c='?';
+        return text;
+    }
+    void file_action(std::uint64_t id,const app::FilePane& p,app::FileOperation kind,const app::FileEntry* entry=nullptr) {
+        operation_parent=p.path;
+        operation={id,p.remote,kind,entry?app::file_child(p.path,entry->name,p.remote):p.path,{},0,false};
+        copy(operation_target,kind==app::FileOperation::Rename&&entry?entry->name:"");
+        std::snprintf(permissions.data(),permissions.size(),"%04o",entry?entry->permissions&07777:0);
+        operation_pending=true;
+    }
+    void file_rows(BrowserPane& b,const app::FilePane& p) {
+        if(!b.rebuild)return;
+        b.rebuild=false;b.rows.clear();
+        const auto query=fold_ascii(b.filter.data());
+        for(std::size_t i=0;i<p.entries.size();++i){
+            const auto& name=p.entries[i].name;
+            if(!b.show_hidden&&!name.empty()&&name.front()=='.')continue;
+            if(query.empty()||fold_ascii(name).find(query)!=std::string::npos)b.rows.push_back(static_cast<int>(i));
         }
-        ImGui::PushStyleColor(ImGuiCol_Text,tone(theme.muted));
-        ImGui::TextWrapped("双栏文件传输 · 点选「.. 上级目录」返回；文件可从本地/远端栏拖到另一栏传输。目标已存在时不覆盖，目录递归传输与递归删除暂不可用。");
-        ImGui::PopStyleColor();
-        const float width=std::max(100.f,(ImGui::GetContentRegionAvail().x-layout.column_gap)/2);
-        // Let the two file columns consume the available height; only the
-        // operation buttons and a compact transfer queue stay below.
-        const float pane_height=std::max(150.f,ImGui::GetContentRegionAvail().y-172.f);
-        for(int side=0;side<2;++side) {
-            const bool remote=side==1;auto& path=remote?remote_path:local_path;
-            auto& selection=remote?remote_selection:local_selection;auto& directory=remote?remote_directory:local_directory;
-            const app::FilePane* pane=nullptr;
-            for(const auto& p:m.file_panes)if(p.session_id==s.id&&p.remote==remote)pane=&p;
-            if(pane&&!remote&&std::strcmp(path.data(),".")==0&&pane->path!="."&&!pane->path.empty())copy(path,pane->path);
-            ImGui::PushID(side);ImGui::BeginGroup();
-            ImGui::PushStyleColor(ImGuiCol_ChildBg,tone(theme.card_bg));
-            ImGui::BeginChild("文件栏",ImVec2(width,pane_height),true);
-            label(remote?"远端":"本地");
-            ImGui::PushID(remote?"远端路径":"本地路径");
-            begin_frame_widget("路径");
-            ImGui::SetNextItemWidth(-1);
-            bool go=ImGui::InputText("##路径",path.data(),path.size(),ImGuiInputTextFlags_EnterReturnsTrue);
-            end_frame_widget("路径");
-            ImGui::PopID();
-            if(button("刷新 / 前往",ImVec2(0,layout.button_height_small),"刷新目录"))go=true;
-            ImGui::SameLine();
-            auto navigate=[&](const std::string& target){
-                if(!cb.file_list)return;
-                copy(path,target);selection.clear();cb.file_list(s.id,remote,path.data());
-            };
-            ImGui::BeginDisabled(!cb.file_list);
-            if(button(".. 上级",ImVec2(0,layout.button_height_small),"上级目录"))navigate(parent_path(pane?pane->path:std::string(path.data())));
-            ImGui::EndDisabled();
-            if(go&&cb.file_list){selection.clear();cb.file_list(s.id,remote,path.data());}
-            if(pane) {
-                if(pane->loading) {
-                    // Stepped loading feedback: the active dot advances on a fixed
-                    // cadence, each step is a short transition, never a rotation.
-                    const int step=loading.step(now,reduced_motion);
-                    ImGui::TextUnformatted("正在读取目录");
-                    ImGui::SameLine();
-                    for(int i=0;i<3;++i) {
-                        const bool on=step==i;
-                        ImGui::TextColored(tone(on?theme.accent:theme.muted),"%s",on?"●":"○");
-                    }
-                    loading_visible=!reduced_motion;
+        std::sort(b.rows.begin(),b.rows.end(),[&](int a,int c){
+            const auto& x=p.entries[a];const auto& y=p.entries[c];
+            if(x.directory!=y.directory)return x.directory;
+            if(b.sort_column==1&&x.size!=y.size)return b.descending?x.size>y.size:x.size<y.size;
+            if(b.sort_column==2&&x.mtime!=y.mtime)return b.descending?x.mtime>y.mtime:x.mtime<y.mtime;
+            return b.sort_column==0&&b.descending?x.name>y.name:x.name<y.name;
+        });
+        if(!b.selection.empty()){
+            std::set<std::string> visible;
+            for(int i:b.rows)if(b.selection.count(p.entries[i].name))visible.insert(p.entries[i].name);
+            b.selection.swap(visible);
+        }
+    }
+    void file_browser_pane(const app::SessionView& s,bool remote,BrowserPane& b,const app::FilePane* pane,
+                           const app::FilePane* other,float width,float height,const app::WorkspaceCallbacks& cb) {
+        const bool allowed=!remote||s.connected;
+        const bool busy=pane&&pane->loading;
+        const bool ready=pane&&!pane->path.empty()&&!busy&&allowed;
+        const bool can_transfer=ready&&s.connected&&cb.file_transfer&&other&&!other->path.empty()&&!other->loading;
+        if(pane&&b.revision!=pane->revision){
+            b.revision=pane->revision;b.rebuild=true;
+            if(b.listed_path!=pane->path){b.selection.clear();b.anchor.clear();b.reset_scroll=true;}
+            b.listed_path=pane->path;copy(b.path,pane->path);
+        }
+        std::optional<std::string> navigation;
+        const std::string up=pane?app::file_parent(pane->path,remote):"";
+        auto eligible=[&](const app::FileEntry& e){return e.regular&&app::valid_file_leaf(e.name,app::windows_file_path(!remote));};
+        auto transfer=[&](const app::FileEntry& e){
+            return cb.file_transfer(s.id,!remote,app::file_child(pane->path,e.name,remote),app::file_child(other->path,e.name,!remote));
+        };
+        ImGui::PushID(remote?1:0);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg,tone(theme.card_bg));
+        ImGui::BeginChild("文件栏",ImVec2(width,height),true);
+        ImGui::TextColored(tone(theme.accent),"%s",remote?"远端 · SFTP":"本地文件");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!allowed||busy||!cb.file_list);
+        if(ImGui::SmallButton("主目录"))navigation=".";
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!ready||up==pane->path);
+        if(ImGui::SmallButton("上一级"))navigation=up;
+        ImGui::EndDisabled();ImGui::SameLine();
+        if(ImGui::SmallButton("刷新"))navigation=pane&&!pane->path.empty()?pane->path:std::string(b.path.data());
+        ImGui::SetNextItemWidth(std::max(30.f,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize("前往").x-24.f));
+        if(ImGui::InputTextWithHint("##路径","输入目录路径",b.path.data(),b.path.size(),ImGuiInputTextFlags_EnterReturnsTrue))navigation=b.path.data();
+        ImGui::SameLine();if(ImGui::Button("前往"))navigation=b.path.data();
+        ImGui::EndDisabled();
+        ImGui::SetNextItemWidth(std::max(30.f,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize("隐藏项").x-44.f));
+        if(ImGui::InputTextWithHint("##筛选","筛选当前目录",b.filter.data(),b.filter.size())){b.rebuild=true;b.reset_scroll=true;}
+        ImGui::SameLine();if(ImGui::Checkbox("隐藏项",&b.show_hidden)){b.rebuild=true;b.reset_scroll=true;}
+        if(pane)file_rows(b,*pane);
+        int selected_files=0;
+        if(pane&&!b.selection.empty())for(int i:b.rows){const auto& e=pane->entries[i];if(b.selection.count(e.name)&&eligible(e))++selected_files;}
+        const std::string send=std::string(remote?"下载":"上传")+(selected_files?" ("+std::to_string(selected_files)+")":"");
+        ImGui::BeginDisabled(!can_transfer||!selected_files);
+        if(button((send+"###传输").c_str(),ImVec2(0,layout.button_height_small),remote?"远端传输":"本地传输",ButtonKind::Primary)){
+            int added=0;
+            for(int i:b.rows){const auto& e=pane->entries[i];if(b.selection.count(e.name)&&eligible(e)&&transfer(e))++added;}
+            b.transfer_feedback="已入队 "+std::to_string(added)+" / "+std::to_string(selected_files)+" 个文件";
+            if(added<selected_files)b.transfer_feedback+="（重复任务或队列已满）";
+        }
+        ImGui::EndDisabled();ImGui::SameLine();
+        ImGui::BeginDisabled(!ready||!cb.file_operation);
+        if(ImGui::Button("新建目录"))file_action(s.id,*pane,app::FileOperation::Mkdir);
+        ImGui::EndDisabled();ImGui::SameLine();
+        ImGui::BeginDisabled(!ready||b.rows.empty());
+        if(ImGui::Button("全选"))for(int i:b.rows)b.selection.insert(pane->entries[i].name);
+        ImGui::EndDisabled();
+        if(!allowed)label("等待 SSH 连接，远端文件暂不可用");
+        else if(busy){
+            const char* steps[]={"正在读取目录 .","正在读取目录 ..","正在读取目录 ..."};
+            const int step=loading.step(now,reduced_motion);
+            label(step<0?"正在读取目录":steps[step]);loading_visible=!reduced_motion;
+        } else if(pane&&!pane->error.empty()){
+            ImGui::TextColored(tone(theme.danger),"%s",elide(ImGui::GetFont(),ImGui::GetFontSize(),pane->error,ImGui::GetContentRegionAvail().x).c_str());
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("未进入：%s\n当前目录：%s",pane->requested_path.c_str(),pane->path.c_str());
+        } else ImGui::TextColored(tone(theme.muted),"%zu / %zu 项 · 已选 %zu%s",b.rows.size(),pane?pane->entries.size():0,b.selection.size(),pane&&pane->truncated?" · 列表已截断":"");
+        if(!b.transfer_feedback.empty()){
+            label(elide(ImGui::GetFont(),ImGui::GetFontSize(),b.transfer_feedback,ImGui::GetContentRegionAvail().x));
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",b.transfer_feedback.c_str());
+        }
+        if(pane&&!pane->operation_message.empty()){
+            ImGui::TextColored(tone(pane->operation_failed?theme.danger:theme.success),"%s",elide(ImGui::GetFont(),ImGui::GetFontSize(),pane->operation_message,ImGui::GetContentRegionAvail().x).c_str());
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",pane->operation_message.c_str());
+        }
+        if(pane&&!pane->path.empty()){
+            ImGui::TextColored(tone(theme.muted),"%s",elide(ImGui::GetFont(),ImGui::GetFontSize(),show_filename(pane->path),ImGui::GetContentRegionAvail().x).c_str());
+            if(ImGui::IsItemHovered())ImGui::SetTooltip("当前目录：%s",pane->path.c_str());
+            const bool wide=ImGui::GetContentRegionAvail().x>=355.f;
+            const auto flags=ImGuiTableFlags_ScrollY|ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH|
+                ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_Sortable|ImGuiTableFlags_Resizable;
+            ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,tone(theme.frame_bg));
+            ImGui::PushStyleColor(ImGuiCol_TableBorderLight,tone(fade_color(theme.separator,0.35f)));
+            ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt,tone(fade_color(theme.accent,0.035f)));
+            if(ImGui::BeginTable(wide?"文件表格":"精简表格",wide?3:2,flags,ImVec2(0,std::max(64.f,ImGui::GetContentRegionAvail().y-2.f)))){
+                ImGui::TableSetupColumn("名称",ImGuiTableColumnFlags_WidthStretch|ImGuiTableColumnFlags_DefaultSort,1.f,0);
+                ImGui::TableSetupColumn("大小",ImGuiTableColumnFlags_WidthFixed,70.f,1);
+                if(wide)ImGui::TableSetupColumn("修改时间",ImGuiTableColumnFlags_WidthFixed,126.f,2);
+                ImGui::TableSetupScrollFreeze(0,1);ImGui::TableHeadersRow();
+                if(auto* spec=ImGui::TableGetSortSpecs();spec&&spec->SpecsDirty&&spec->SpecsCount){
+                    b.sort_column=spec->Specs[0].ColumnIndex;b.descending=spec->Specs[0].SortDirection==ImGuiSortDirection_Descending;
+                    spec->SpecsDirty=false;b.rebuild=true;file_rows(b,*pane);
                 }
-                if(!pane->error.empty())ImGui::TextWrapped("%s",pane->error.c_str());
-                ImGui::TextWrapped("当前: %s",pane->path.c_str());
-                const std::string up=parent_path(pane->path);
-                if(up!=pane->path&&selectable(".. 上级目录",false,0,ImVec2(0,0),"上级目录"))navigate(up);
-                for(const auto& e:pane->entries) {
-                    ImGui::PushID(e.name.c_str());
-                    const std::string title=(e.directory?"[目录] ":(e.symlink?"[链接] ":""))+e.name;
-                    const std::string entry_id=std::string(remote?"远端文件:":"本地文件:")+e.name;
-                    if(selectable(title.c_str(),selection==e.name,ImGuiSelectableFlags_AllowDoubleClick,ImVec2(0,0),entry_id.c_str())) {
-                        selection=e.name;directory=e.directory;
-                        if(e.directory&&ImGui::IsMouseDoubleClicked(0)&&cb.file_list){copy(path,child_path(pane->path,e.name));selection.clear();cb.file_list(s.id,remote,path.data());}
-                    }
-                    if(ImGui::IsItemHovered())ImGui::SetTooltip("%llu 字节 · 权限 %04o",static_cast<unsigned long long>(e.size),e.permissions&07777);
-                    file_drop_target(s.id,remote,pane->path,cb);
-                    if(!e.directory&&e.name.size()<sizeof(DraggedFile::name)&&pane->path.size()<sizeof(DraggedFile::dir)) {
-                        if(ImGui::BeginDragDropSource()) {
-                            DraggedFile dragged;dragged.session=s.id;dragged.remote=remote;
-                            std::snprintf(dragged.name,sizeof(dragged.name),"%s",e.name.c_str());
-                            std::snprintf(dragged.dir,sizeof(dragged.dir),"%s",pane->path.c_str());
-                            ImGui::SetDragDropPayload("JIANSSH_FILE",&dragged,sizeof(dragged));
-                            ImGui::TextUnformatted(title.c_str());
-                            ImGui::EndDragDropSource();
+                if(b.reset_scroll){ImGui::SetScrollY(0);b.reset_scroll=false;}
+                if(b.rows.empty()){
+                    ImGui::TableNextRow();ImGui::TableNextColumn();label(pane->entries.empty()?"此目录为空":"没有匹配的项目");
+                }
+                ImGui::PushStyleColor(ImGuiCol_Header,tone(theme.header));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered,tone(theme.header_hovered));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive,tone(theme.header_active));
+                ImGuiListClipper clipper;clipper.Begin(static_cast<int>(b.rows.size()));
+                while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){
+                    const auto& e=pane->entries[b.rows[row]];
+                    ImGui::PushID(b.rows[row]);ImGui::TableNextRow();ImGui::TableNextColumn();
+                    const bool chosen=b.selection.count(e.name)!=0;
+                    const auto title=std::string(e.directory?"目录  ":e.symlink?"链接  ":e.regular?"":"其他  ")+show_filename(e.name);
+                    const auto text=elide(ImGui::GetFont(),ImGui::GetFontSize(),title,ImGui::GetContentRegionAvail().x);
+                    const auto origin=ImGui::GetCursorScreenPos();
+                    if(ImGui::Selectable("##文件",chosen,ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick|(!ready?ImGuiSelectableFlags_Disabled:0),ImVec2(0,ImGui::GetTextLineHeight()))){
+                        if(e.directory&&ImGui::IsMouseDoubleClicked(0)&&cb.file_list)navigation=app::file_child(pane->path,e.name,remote);
+                        const auto& io=ImGui::GetIO();
+                        if(io.KeyShift){
+                            const auto first=std::find_if(b.rows.begin(),b.rows.end(),[&](int i){return pane->entries[i].name==b.anchor;});
+                            const int start=first==b.rows.end()?row:static_cast<int>(first-b.rows.begin());
+                            if(!io.KeyCtrl&&!io.KeySuper)b.selection.clear();
+                            for(int i=std::min(start,row);i<=std::max(start,row);++i)b.selection.insert(pane->entries[b.rows[i]].name);
+                        } else {
+                            if(!io.KeyCtrl&&!io.KeySuper)b.selection.clear();
+                            if((io.KeyCtrl||io.KeySuper)&&chosen)b.selection.erase(e.name);else b.selection.insert(e.name);
+                            b.anchor=e.name;
                         }
                     }
+                    ImGui::GetWindowDrawList()->AddText(origin,ImGui::GetColorU32(tone(e.directory?theme.accent:e.symlink?theme.muted:theme.ink)),text.c_str());
+                    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s\n%s · 权限 %04o",title.c_str(),file_time(e.mtime).c_str(),e.permissions&07777);
+                    if(ready&&s.connected&&e.regular&&ImGui::BeginDragDropSource()){
+                        dragged_file={s.id,remote,e.name,pane->path};
+                        ImGui::SetDragDropPayload("JIANSSH_FILE",nullptr,0);
+                        ImGui::TextUnformatted(title.c_str());ImGui::EndDragDropSource();
+                    }
+                    if(ready&&s.connected&&ImGui::GetDragDropPayload()){
+                        const auto target=e.directory?app::file_child(pane->path,e.name,remote):pane->path;
+                        file_drop_target(s.id,remote,target,b,cb);
+                    }
+                    if(ready&&ImGui::BeginPopupContextItem()){
+                        if(e.directory&&ImGui::MenuItem("打开目录",nullptr,false,cb.file_list!=nullptr))navigation=app::file_child(pane->path,e.name,remote);
+                        if(ImGui::MenuItem(remote?"下载此文件":"上传此文件",nullptr,false,can_transfer&&eligible(e)))
+                            b.transfer_feedback=transfer(e)?"已加入传输队列":"未加入队列：可能已在队列中或队列已满";
+                        if(ImGui::MenuItem("复制完整路径"))ImGui::SetClipboardText(app::file_child(pane->path,e.name,remote).c_str());
+                        if(ImGui::MenuItem("重命名",nullptr,false,cb.file_operation!=nullptr))file_action(s.id,*pane,app::FileOperation::Rename,&e);
+                        if(ImGui::MenuItem("权限",nullptr,false,cb.file_operation&&(e.regular||e.directory)&&!app::windows_file_path(remote)))file_action(s.id,*pane,app::FileOperation::Chmod,&e);
+                        if(ImGui::MenuItem("删除",nullptr,false,cb.file_operation&&!e.directory))file_action(s.id,*pane,app::FileOperation::Delete,&e);
+                        ImGui::EndPopup();
+                    }
+                    if(ImGui::TableNextColumn())label(e.regular?file_size(e.size):"—");
+                    if(wide&&ImGui::TableNextColumn())label(file_time(e.mtime));
                     ImGui::PopID();
                 }
-                const float remaining=ImGui::GetContentRegionAvail().y;
-                if(remaining>1.f) {
-                    ImGui::Dummy(ImVec2(std::max(1.f,ImGui::GetContentRegionAvail().x),remaining));
-                    file_drop_target(s.id,remote,pane->path,cb);
-                }
-            } else label("尚无目录结果。请刷新。");
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-            const std::string base=pane?pane->path:std::string(path.data());
-            const char* ops[]={"新建目录","重命名","删除","权限"};
-            for(int op=0;op<4;++op) {
-                ImGui::BeginDisabled(!cb.file_operation||(op>0&&(selection.empty()||selection=="."||selection==".."))||(op==2&&directory));
-                if(small_button(ops[op],ops[op])) {
-                    operation={s.id,remote,static_cast<app::FileOperation>(op),op==0?base:child_path(base,selection),{},0,false};
-                    operation_target.fill(0);copy(permissions,"0644");operation_pending=true;
-                }
-                ImGui::EndDisabled();if(op!=3)ImGui::SameLine();
+                ImGui::PopStyleColor(3);ImGui::EndTable();
+                if(ready&&s.connected)file_drop_target(s.id,remote,pane->path,b,cb);
             }
-            ImGui::EndGroup();ImGui::PopID();if(!remote)ImGui::SameLine();
+            ImGui::PopStyleColor(3);
+        } else if(allowed&&!busy)label("没有可显示的目录，请刷新或前往指定路径");
+        ImGui::EndChild();ImGui::PopStyleColor();ImGui::PopID();
+        if(navigation&&allowed&&cb.file_list){b.transfer_feedback.clear();copy(b.path,*navigation);cb.file_list(s.id,remote,std::move(*navigation));}
+    }
+    void files(const app::SessionView& s,const app::WorkspaceModel& m,const app::WorkspaceCallbacks& cb) {
+        auto& browser=browsers[s.id];
+        for(int i=0;i<2;++i)if(!browser.requested[i]&&cb.file_list&&(i==0||s.connected)){
+            browser.requested[i]=true;copy(browser.panes[i].path,".");cb.file_list(s.id,i==1,".");
         }
-        const app::FilePane *lp=nullptr,*rp=nullptr;
-        for(const auto& p:m.file_panes)if(p.session_id==s.id){if(p.remote)rp=&p;else lp=&p;}
-        ImGui::BeginDisabled(!s.connected||!cb.file_transfer||!lp||!rp||local_selection.empty()||local_directory);
-        if(button("上传选中文件",ImVec2(0,layout.button_height),"上传文件")&&lp&&rp)cb.file_transfer(s.id,true,child_path(lp->path,local_selection),child_path(rp->path,local_selection));
-        ImGui::EndDisabled();ImGui::SameLine();
-        ImGui::BeginDisabled(!s.connected||!cb.file_transfer||!lp||!rp||remote_selection.empty()||remote_directory);
-        if(button("下载选中文件",ImVec2(0,layout.button_height),"下载文件")&&lp&&rp)cb.file_transfer(s.id,false,child_path(rp->path,remote_selection),child_path(lp->path,remote_selection));
-        ImGui::EndDisabled();
-        ImGui::Separator();label("任务队列（真实字节进度）");
-        ImGui::BeginChild("传输队列",ImVec2(0,0),false);
-        for(const auto& t:m.transfers)if(t.session_id==s.id) {
-            ImGui::PushID(static_cast<int>(t.id));ImGui::TextWrapped("%s %s → %s",t.upload?"上传":"下载",t.source.c_str(),t.destination.c_str());
-            const char* states[]={"排队","传输中","完成","失败","已取消"};
-            ImGui::Text("%s · %llu / %llu 字节",states[static_cast<int>(t.state)],static_cast<unsigned long long>(t.completed_bytes),static_cast<unsigned long long>(t.total_bytes));
-            if(t.total_bytes) {
-                // The bar eases towards the reported fraction instead of jumping.
-                const float target=static_cast<float>(std::min(1.0,static_cast<double>(t.completed_bytes)/t.total_bytes));
-                float& shown=progress_shown[t.id];
-                shown=reduced_motion?target:smooth_towards(shown,target,ImGui::GetIO().DeltaTime,motion.progress);
-                progress_visible|=std::abs(target-shown)>0.001f;
-                ImGui::ProgressBar(shown,ImVec2(-1,layout.progress_bar_height),"");
-            }
-            if(!t.error.empty())ImGui::TextWrapped("%s",t.error.c_str());
-            if((t.state==app::TransferState::Queued||t.state==app::TransferState::Running)&&cb.file_cancel&&small_button("取消任务","取消任务"))cb.file_cancel(t.id);
-            ImGui::PopID();
+        const app::FilePane* panes[2]{};
+        for(const auto& p:m.file_panes)if(p.session_id==s.id)panes[p.remote?1:0]=&p;
+        const auto avail=ImGui::GetContentRegionAvail();
+        const bool stacked=avail.x<590.f;
+        const float queue_height=browser.show_queue?std::clamp(avail.y*0.27f,82.f,165.f):0.f;
+        const float pane_space=avail.y-queue_height-ImGui::GetFrameHeightWithSpacing()*(avail.x>=320.f?1.f:2.f)
+            -(browser.show_queue?ImGui::GetStyle().ItemSpacing.y:0.f);
+        const float height=std::max(242.f,stacked?(pane_space-ImGui::GetStyle().ItemSpacing.y)/2.f:pane_space);
+        const float width=stacked?avail.x:(avail.x-layout.column_gap)/2.f;
+        const auto scope=std::to_string(s.id);
+        ImGui::PushID(scope.c_str());
+        for(int i=0;i<2;++i){
+            if(i&&!stacked)ImGui::SameLine(0,layout.column_gap);
+            file_browser_pane(s,i==1,browser.panes[i],panes[i],panes[1-i],width,height,cb);
         }
-        ImGui::EndChild();
+        int active=0,done=0;
+        for(const auto& t:m.transfers)if(t.session_id==s.id){if(app::transfer_active(t.state))++active;else ++done;}
+        const std::string header=std::string(browser.show_queue?"收起队列":"展开队列")+" · 进行中 "+std::to_string(active)+" / 已结束 "+std::to_string(done)+"###队列开关";
+        if(ImGui::Button(header.c_str()))browser.show_queue=!browser.show_queue;
+        if(avail.x>=320.f)ImGui::SameLine();
+        ImGui::BeginDisabled(!done||!cb.file_clear_completed);
+        const bool clear=ImGui::Button("清除已结束");ImGui::EndDisabled();
+        if(browser.show_queue){
+            ImGui::PushStyleColor(ImGuiCol_ChildBg,tone(theme.card_bg));
+            ImGui::BeginChild("传输队列",ImVec2(0,std::max(queue_height,82.f)),true);
+            if(!active&&!done)ImGui::TextWrapped("拖拽普通文件到另一栏，或选择文件后点击上传 / 下载。Ctrl / Shift 可多选，右键打开文件菜单；同名目标不会被覆盖。");
+            auto task_row=[&](const app::TransferTask& t){
+                const bool finished=!app::transfer_active(t.state);
+                ImGui::PushID(static_cast<int>(t.id));
+                const char* states[]={"排队中","传输中","已完成","失败","已取消"};
+                const char* status=t.cancel_requested&&!finished?"正在取消":states[static_cast<int>(t.state)];
+                const ImU32 tint=t.state==app::TransferState::Failed?theme.danger:t.state==app::TransferState::Completed?theme.success:theme.muted;
+                const auto filename=t.source.substr(t.source.find_last_of(t.upload&&app::windows_file_path(false)?"/\\":"/")+1);
+                const std::string title=std::string(t.upload?"上传 · ":"下载 · ")+show_filename(filename);
+                ImGui::TextColored(tone(tint),"%s",status);ImGui::SameLine();
+                ImGui::TextUnformatted(elide(ImGui::GetFont(),ImGui::GetFontSize(),title,ImGui::GetContentRegionAvail().x).c_str());
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("源：%s\n目标：%s",t.source.c_str(),t.destination.c_str());
+                if(t.total_bytes||t.state==app::TransferState::Completed){
+                    const float ratio=t.total_bytes?static_cast<float>(std::min(1.0,static_cast<double>(t.completed_bytes)/t.total_bytes)):1.f;
+                    const auto bytes=file_size(t.completed_bytes)+" / "+file_size(t.total_bytes);
+                    ImGui::ProgressBar(ratio,ImVec2(finished?-1.f:-76.f,ImGui::GetFrameHeight()),bytes.c_str());
+                    if(!finished)ImGui::SameLine();
+                }
+                if(!t.error.empty())ImGui::TextWrapped("%s",t.error.c_str());
+                if(!finished&&cb.file_cancel){
+                    ImGui::BeginDisabled(t.cancel_requested);
+                    if(ImGui::SmallButton("取消任务"))cb.file_cancel(t.id);
+                    ImGui::EndDisabled();
+                }
+                ImGui::Separator();ImGui::PopID();
+            };
+            for(const auto& t:m.transfers)if(t.session_id==s.id&&app::transfer_active(t.state))task_row(t);
+            for(auto it=m.transfers.rbegin();it!=m.transfers.rend();++it)if(it->session_id==s.id&&!app::transfer_active(it->state))task_row(*it);
+            ImGui::EndChild();ImGui::PopStyleColor();
+        }
+        if(clear)cb.file_clear_completed(s.id);
+        ImGui::PopID();
     }
     static std::string human_rate(double value) {
         char text[40];
@@ -1314,7 +1514,7 @@ bool Workspace::animation_active()const noexcept {
     const auto& v=*impl_;
     return v.entrance.active()||v.selection.active()||v.hover.active()||v.modal.active()||
            v.theme_fade.active()||v.notice_fade.active()||v.hover_anim.active()||v.toggle_anim.active()||
-           v.page.active()||v.loading_visible||v.progress_visible||static_cast<bool>(v.key_task);
+           v.page.active()||v.loading_visible||static_cast<bool>(v.key_task);
 }
 Rgba Workspace::background_color()const noexcept {
     const auto c=ImGui::ColorConvertU32ToFloat4(impl_->theme.window_bg);
@@ -1356,11 +1556,13 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         ?v.page.incoming_offset(static_cast<float>(motion.page_slide))
         :-v.page.outgoing_offset(static_cast<float>(motion.page_out_slide));
     v.loading_visible=false;
-    v.progress_visible=false;
+    std::erase_if(v.browsers,[&](const auto& item){return std::none_of(m.sessions.begin(),m.sessions.end(),[&](const auto& session){return session.id==item.first;});});
     if(fonts.regular)ImGui::PushFont(fonts.regular);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(layout.window_padding_x,layout.window_padding_y));
+    const bool session_layout=active!=nullptr;
+    const float item_spacing=session_layout?layout.session_spacing:layout.item_spacing;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,session_layout?ImVec2(layout.session_padding,layout.session_padding):ImVec2(layout.window_padding_x,layout.window_padding_y));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(layout.frame_padding_x,layout.frame_padding_y));
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(layout.item_spacing,layout.item_spacing));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(item_spacing,item_spacing));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,layout.frame_rounding);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,layout.child_rounding);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding,layout.popup_rounding);
@@ -1386,15 +1588,23 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         dl->AddRectFilledMultiColor(p,q,top,top,bottom,bottom);
     }
     const auto full=ImGui::GetContentRegionAvail();
-    // Column widths always add up to the space the workspace was given.
+    const bool narrow=session_layout&&(full.x<layout.session_sidebar_breakpoint||viewport->WorkSize.y<layout.session_sidebar_min_height);
+    if(!narrow)v.narrow_devices=false;
+    const bool devices_only=narrow&&v.narrow_devices;
+    const bool show_devices=!narrow||devices_only;
     const Regions regions=compute_regions(full.x,layout);
+    const float gap=session_layout?layout.session_sidebar_gap:layout.column_gap;
+    const float sidebar_width=devices_only?full.x:session_layout?session_sidebar_width(full.x):regions.sidebar;
+    const float central_width=show_devices?std::max(1.f,full.x-sidebar_width-gap):full.x;
     // Reserve the inter-item gap and the actual footer height, not just the
     // nominal status-bar height, so fixed panels do not overflow the viewport.
     const float footer_height=6.f+std::max(18.f,ImGui::GetTextLineHeight());
     const float height=std::max(1.f,full.y-ImGui::GetStyle().ItemSpacing.y-std::max(layout.status_bar_height,footer_height));
+    const store::Host* chosen=nullptr;for(const auto& h:m.hosts)if(h.id==v.selected_host){chosen=&h;break;}
+    if(show_devices){
     ImGui::PushStyleColor(ImGuiCol_ChildBg,tone(v.theme.sidebar_bg));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha,.30f+.70f*entry_side);
-    ImGui::BeginChild("设备导航",ImVec2(regions.sidebar,height),true,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild("设备导航",ImVec2(sidebar_width,height),true,session_layout?ImGuiWindowFlags_None:ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     v.panel_depth(0.045f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY()+8.f*(1.f-entry_side));
     const ImVec2 brand=ImGui::GetCursorScreenPos();
@@ -1404,9 +1614,12 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     if(fonts.heading)ImGui::PushFont(fonts.heading);
     ImGui::TextUnformatted("JianSSH");
     if(fonts.heading)ImGui::PopFont();
-    ImGui::TextColored(tone(v.theme.muted),"安全连接，从容抵达");
+    if(!session_layout)ImGui::TextColored(tone(v.theme.muted),"安全连接，从容抵达");
     ImGui::EndGroup();
-    ImGui::Spacing();ImGui::Spacing();
+    if(!session_layout){ImGui::Spacing();ImGui::Spacing();}
+    if(devices_only&&v.button("返回会话",ImVec2(-1,layout.button_height_small),"返回会话"))v.narrow_devices=false;
+    if(session_layout&&v.button("＋ 快速连接",ImVec2(-1,layout.button_height_small),"快速连接",ButtonKind::Primary)){v.prepare_connection({},m);v.connect_pending=true;}
+    if(session_layout&&chosen&&v.button("连接所选设备",ImVec2(-1,layout.button_height_small),"连接所选设备")){v.prepare_connection(*chosen,m);v.connect_pending=true;}
     v.search_field("搜索名称、地址或用户",v.search.data(),v.search.size(),"搜索设备");
     ImGui::Spacing();
     if(v.button("＋ 新增设备",ImVec2(-1,layout.button_height),"新增设备")) {v.prepare_connection({},m);v.edit_pending=true;}
@@ -1482,12 +1695,15 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
-    ImGui::SameLine(0,layout.column_gap);
-    ImGui::BeginChild("连接工作区",ImVec2(regions.central,height),true,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+    }
+    if(!devices_only){
+    if(show_devices)ImGui::SameLine(0,gap);
+    ImGui::BeginChild("连接工作区",ImVec2(central_width,height),true,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
     v.panel_depth(0.030f);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY()+6.f*(1.f-entry));
     const float header_width=ImGui::GetContentRegionAvail().x;
     const float content_right=ImGui::GetWindowContentRegionMax().x;
+    if(!session_layout){
     const bool show_connect=header_width>=430.f;
     const bool full_actions=header_width>=640.f;
     // Toolbar: large title left, commands aligned to the right edge.
@@ -1495,7 +1711,6 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     ImGui::TextUnformatted("连接工作台");
     if(fonts.heading)ImGui::PopFont();
     const float title_end=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
-    const store::Host* chosen=nullptr;for(const auto& h:m.hosts)if(h.id==v.selected_host){chosen=&h;break;}
     constexpr float quick_w=110.f, connect_w=96.f, small_w=52.f;
     const float actions_width=quick_w+(show_connect?8.f+connect_w:0.f)+(full_actions?16.f+small_w*2.f:0.f);
     ImGui::SameLine(std::max(title_end+22.f,content_right-actions_width));
@@ -1518,8 +1733,13 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
             ImVec2(line_start.x+ImGui::GetContentRegionAvail().x,line_start.y+3.f),fade_color(v.theme.separator,0.55f));
         ImGui::Dummy(ImVec2(0,8.f));
     }
+    }
     auto session_tabs=[&]{
-        ImGui::BeginChild("会话标签",ImVec2(0,layout.tab_bar_height),false,ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::BeginChild("会话标签",ImVec2(0,layout.session_tab_bar_height),false,ImGuiWindowFlags_HorizontalScrollbar);
+        if(narrow){
+            if(v.button("设备",ImVec2(0,layout.tab_height),"设备导航"))v.narrow_devices=true;
+            ImGui::SameLine(0,layout.tab_gap);
+        }
         for(const auto& s:m.sessions) {
             ImGui::PushID(static_cast<int>(s.id));
             const std::string title=std::string(s.type==app::SessionType::Serial?"串口 · ":"")+s.title;
@@ -1566,7 +1786,7 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         }
         ImGui::EndChild();
     };
-    if(!m.sessions.empty())session_tabs();
+    if(session_layout)session_tabs();
     auto welcome_page=[&]{
         ImGui::SetCursorPosY(ImGui::GetCursorPosY()+std::max(0.f,v.page_offset));
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha,v.page_alpha);
@@ -1626,8 +1846,12 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         static const char* view_labels[]={"终端","文件传输"};
         const float seg_width=can_files?v.segmented_width(view_labels,2):0.f;
         const float disconnect_width=ImGui::CalcTextSize(disconnect_label).x+24.f;
-        const float right_width=seg_width+(can_files?10.f:0.f)+disconnect_width;
-        const float status_max=std::max(40.f,ImGui::GetContentRegionAvail().x-right_width-28.f);
+        // In very narrow windows the session tab's close button already offers
+        // the same action. Keep the mode selector on a single toolbar row.
+        const bool show_disconnect=header_width>=seg_width+disconnect_width+95.f;
+        const float right_width=seg_width+(show_disconnect?disconnect_width+(can_files?10.f:0.f):0.f);
+        const bool status_inline=ImGui::GetContentRegionAvail().x>=right_width+85.f;
+        const float status_max=status_inline?ImGui::GetContentRegionAvail().x-right_width-28.f:ImGui::GetContentRegionAvail().x-18.f;
         const ImVec2 status_pos=ImGui::GetCursorScreenPos();
         ImGui::Dummy(ImVec2(14,18));ImGui::SameLine(0,0);
         {
@@ -1638,39 +1862,41 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         }
         v.label(elide(ImGui::GetFont(),ImGui::GetFontSize(),active->status,status_max));
         const float label_end=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
-        ImGui::SameLine(std::max(label_end+16.f,content_right-right_width));
+        if(status_inline&&right_width>0)ImGui::SameLine(std::max(label_end+12.f,content_right-right_width));
         if(can_files) {
             const int clicked=v.segmented("视图切换",view_labels,2,v.view);
             if(clicked>=0)v.view=clicked;
-            ImGui::SameLine(0,10.f);
+            if(show_disconnect)ImGui::SameLine(0,10.f);
         }
-        if(v.button(disconnect_label,ImVec2(disconnect_width,layout.button_height_small),"断开会话")) {
+        if(show_disconnect&&v.button(disconnect_label,ImVec2(disconnect_width,layout.button_height_small),"断开会话")) {
             v.close_session=active->id;v.close_title=active->title;v.close_pending=true;
         }
         if(!active->error.empty()) {
             if(active->type==app::SessionType::Serial) v.serial_error("##串口会话错误",active->error);
             else ImGui::TextColored(tone(v.theme.danger),"%s",active->error.c_str());
         }
-        ImGui::Spacing();
         const app::SessionView* shown=nullptr;
         if(v.page_session)for(const auto& s:m.sessions)if(s.id==v.page_session)shown=&s;
         if(!shown) welcome_page();
         else {
-            const bool shown_monitor=shown->type==app::SessionType::Ssh&&shown->capabilities.monitor;
-            const float bar_space=shown_monitor?layout.metrics_bar_height+layout.metrics_bar_gap:0.f;
+            const bool shown_monitor=v.page_view==0&&shown->type==app::SessionType::Ssh&&shown->capabilities.monitor&&
+                ImGui::GetContentRegionAvail().x>=580.f&&ImGui::GetContentRegionAvail().y>=300.f;
+            const float bar_space=shown_monitor?layout.metrics_bar_height+ImGui::GetStyle().ItemSpacing.y:0.f;
             ImGui::SetCursorPosY(ImGui::GetCursorPosY()+std::clamp(v.page_offset,-18.f,18.f));
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha,v.page_alpha);
-            const float view_height=std::max(40.f,ImGui::GetContentRegionAvail().y-bar_space);
-            ImGui::BeginChild("会话视图",ImVec2(0,view_height),false,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
+            const float view_height=std::max(1.f,ImGui::GetContentRegionAvail().y-bar_space);
+            const ImGuiWindowFlags scroll_flags=v.page_view==0?ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse:ImGuiWindowFlags_None;
+            ImGui::BeginChild("会话视图",ImVec2(0,view_height),false,scroll_flags);
             if(v.page_view==0)v.terminal(*shown,cb,fonts); else v.files(*shown,m,cb);
             ImGui::EndChild();
-            if(shown_monitor) {ImGui::Dummy(ImVec2(0,layout.metrics_bar_gap));v.metrics_bar(*shown,m,cb);}
+            if(shown_monitor)v.metrics_bar(*shown,m,cb);
             ImGui::PopStyleVar();
         }
     } else {
         welcome_page();
     }
     ImGui::EndChild();
+    }
     // Status bar: a hairline and a quiet summary, matching a macOS footer.
     {
         const ImVec2 status_origin=ImGui::GetCursorScreenPos();

@@ -20,16 +20,18 @@ struct Layout {
     float frame_padding_y = 8.f;
     float item_spacing = 10.f;
     float section_spacing = 18.f;
-    float frame_rounding = 8.f;
-    float child_rounding = 12.f;
-    float popup_rounding = 14.f;
+    float frame_rounding = 10.f;
+    float child_rounding = 16.f;
+    float popup_rounding = 16.f;
+    float menu_rounding = 12.f;
+    float tooltip_rounding = 10.f;
     float window_rounding = 0.f;
-    float scrollbar_size = 8.f;
+    float scrollbar_size = 7.f;
     float scrollbar_rounding = 4.f;
-    float grab_rounding = 4.f;
+    float grab_rounding = 5.f;
     float grab_min_size = 24.f;
-    float tab_rounding = 8.f;
-    float disabled_alpha = 0.45f;
+    float tab_rounding = 10.f;
+    float disabled_alpha = 0.56f;
 
     // ---- Regions --------------------------------------------------------
     float status_bar_height = 30.f;
@@ -56,7 +58,7 @@ struct Layout {
     float device_row_title_dy = 9.f;
     float device_row_address_dy = 30.f;
     float device_avatar_size = 34.f;
-    float device_outline_rounding = 8.f;
+    float device_outline_rounding = 11.f;
     float device_hover_alpha = 46.f;
     float device_list_min_height = 45.f;
     float device_list_reserve = 58.f;
@@ -77,9 +79,9 @@ struct Layout {
     float input_port_width = 110.f;
     float note_field_height = 64.f;
     float progress_bar_height = 6.f;
-    float segment_height = 30.f;
+    float segment_height = 32.f;
     float segment_padding = 3.f;
-    float segment_rounding = 9.f;
+    float segment_rounding = 11.f;
 
     // ---- Modals ---------------------------------------------------------
     float modal_width_device = 620.f;
@@ -103,17 +105,21 @@ struct Layout {
 
     // ---- Files ----------------------------------------------------------
     float file_pane_height = 260.f;
+    float file_row_height = 26.f;
+    float file_icon_size = 16.f;
+    float file_icon_gap = 7.f;
+    float file_breadcrumb_height = 28.f;
     float paste_preview_height = 220.f;
 
     // ---- Metrics --------------------------------------------------------
     float chart_height = 48.f;
-    float chart_rounding = 4.f;
+    float chart_rounding = 6.f;
     float metrics_bar_height = 36.f;
     float metrics_bar_gap = 6.f;
 
     // ---- Terminal -------------------------------------------------------
     float terminal_padding = 10.f;
-    float terminal_rounding = 10.f;
+    float terminal_rounding = 12.f;
     float terminal_grid_gap = 20.f;
 
     // ---- Welcome --------------------------------------------------------

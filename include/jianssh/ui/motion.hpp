@@ -11,9 +11,18 @@
 namespace jianssh::ui {
 using MotionClock = std::chrono::steady_clock;
 // Curves chosen from Apple's motion vocabulary: decelerating curves for
-// content that arrives, symmetric curves for elements that change in place and
-// a gentle smoothstep for hover tints.
-enum class Easing { Smoothstep, CubicInOut, EaseOutCubic, EaseOutQuint, EaseInOutQuint };
+// content that arrives, symmetric curves for elements that change in place,
+// gentle smoothstep for hover tints, and analytic spring curves for liquid
+// glass jelly slides.
+enum class Easing {
+    Smoothstep,
+    CubicInOut,
+    EaseOutCubic,
+    EaseOutQuint,
+    EaseInOutQuint,
+    EaseOutBack,
+    LiquidSpring
+};
 
 inline double ease(double t, Easing easing = Easing::Smoothstep) noexcept {
     t = std::clamp(t, 0.0, 1.0);
@@ -30,11 +39,162 @@ inline double ease(double t, Easing easing = Easing::Smoothstep) noexcept {
         }
         case Easing::EaseInOutQuint:
             return t < 0.5 ? 16.0 * t * t * t * t * t : 1.0 - std::pow(-2.0 * t + 2.0, 5) / 2.0;
+        case Easing::EaseOutBack: {
+            constexpr double c1 = 1.32;
+            constexpr double c3 = c1 + 1.0;
+            const double u = t - 1.0;
+            return 1.0 + c3 * u * u * u + c1 * u * u;
+        }
+        case Easing::LiquidSpring: {
+            if (t <= 0.0) return 0.0;
+            if (t >= 1.0) return 1.0;
+            // Normalized underdamped spring response (~4.5% gentle liquid overshoot).
+            constexpr double decay = 6.2;
+            constexpr double freq = 9.4;
+            static const double end_val =
+                1.0 - std::exp(-decay) * (std::cos(freq) + (decay / freq) * std::sin(freq));
+            const double env = std::exp(-decay * t);
+            const double raw = 1.0 - env * (std::cos(freq * t) + (decay / freq) * std::sin(freq * t));
+            return raw / end_val;
+        }
         case Easing::Smoothstep:
         default:
             return t * t * (3.0 - 2.0 * t);
     }
 }
+
+// Analytical damped harmonic oscillator evaluated at monotonic timestamps,
+// never Euler-integrated per frame. Guarantees frame-rate independence, exact
+// instantaneous velocity for jelly squash-and-stretch, seamless mid-flight
+// retargeting, and strictly finite settling time so idle CPU stays at zero.
+class Spring {
+public:
+    struct Params {
+        double omega = 22.0;       // Natural angular frequency (rad/s)
+        double damping = 0.64;     // Damping ratio zeta (<1 gives soft liquid rebound)
+        double pos_eps = 0.08;     // Settling position threshold
+        double vel_eps = 0.50;     // Settling velocity threshold
+        double max_seconds = 0.56; // Hard settling cap for power saving
+    };
+
+    explicit Spring(double initial = 0.0, Params params = {22.0, 0.64, 0.08, 0.50, 0.56}) noexcept
+        : params_(params), value_(initial), velocity_(0.0), target_(initial), y0_(0.0), v0_(0.0) {}
+
+    void set_params(Params params) noexcept { params_ = params; }
+
+    void snap(double v) noexcept {
+        value_ = target_ = v;
+        velocity_ = y0_ = v0_ = 0.0;
+        active_ = false;
+    }
+
+    void retarget(double to, MotionClock::time_point now, bool reduced_motion = false) noexcept {
+        if (!std::isfinite(to)) return;
+        update(now, reduced_motion);
+        if (reduced_motion) {
+            snap(to);
+            return;
+        }
+        if (std::abs(to - target_) <= params_.pos_eps * 0.25 && !active_) {
+            target_ = to;
+            value_ = to;
+            return;
+        }
+        target_ = to;
+        y0_ = value_ - target_;
+        v0_ = velocity_;
+        start_ = now;
+        active_ = std::abs(y0_) > params_.pos_eps || std::abs(v0_) > params_.vel_eps;
+        if (!active_) snap(target_);
+    }
+
+    // Add an immediate velocity impulse (e.g. for tactile press bounce).
+    void impulse(double dv, MotionClock::time_point now, bool reduced_motion = false) noexcept {
+        if (reduced_motion || !std::isfinite(dv)) return;
+        update(now, false);
+        y0_ = value_ - target_;
+        v0_ = velocity_ + dv;
+        start_ = now;
+        active_ = std::abs(y0_) > params_.pos_eps || std::abs(v0_) > params_.vel_eps;
+    }
+
+    double update(MotionClock::time_point now, bool reduced_motion = false) noexcept {
+        if (!active_) return value_;
+        if (reduced_motion) {
+            snap(target_);
+            return value_;
+        }
+        const double t = std::max(0.0, std::chrono::duration<double>(now - start_).count());
+        if (t >= params_.max_seconds) {
+            snap(target_);
+            return value_;
+        }
+        const double w = std::max(1.0, params_.omega);
+        const double z = std::clamp(params_.damping, 0.15, 2.0);
+        double y = 0.0;
+        double v = 0.0;
+        if (z < 0.999) {
+            const double wd = w * std::sqrt(1.0 - z * z);
+            const double decay = std::exp(-z * w * t);
+            const double a = y0_;
+            const double b = (v0_ + z * w * y0_) / wd;
+            const double c = std::cos(wd * t);
+            const double s = std::sin(wd * t);
+            y = decay * (a * c + b * s);
+            v = decay * ((b * wd - a * z * w) * c - (a * wd + b * z * w) * s);
+        } else if (z <= 1.001) {
+            const double decay = std::exp(-w * t);
+            const double a = y0_;
+            const double b = v0_ + w * y0_;
+            y = decay * (a + b * t);
+            v = decay * (b - w * (a + b * t));
+        } else {
+            const double r = w * std::sqrt(z * z - 1.0);
+            const double r1 = -z * w + r;
+            const double r2 = -z * w - r;
+            const double c1 = (v0_ - r2 * y0_) / (r1 - r2);
+            const double c2 = y0_ - c1;
+            const double e1 = std::exp(r1 * t);
+            const double e2 = std::exp(r2 * t);
+            y = c1 * e1 + c2 * e2;
+            v = c1 * r1 * e1 + c2 * r2 * e2;
+        }
+        // Smooth cosine taper across the final 12% of max_seconds so the hard
+        // power-saving cap never produces a visible snap.
+        const double taper_start = params_.max_seconds * 0.88;
+        if (t > taper_start) {
+            const double u = (t - taper_start) / (params_.max_seconds - taper_start);
+            const double k = 0.5 * (1.0 + std::cos(3.14159265358979323846 * u));
+            y *= k;
+            v *= k;
+        }
+        value_ = target_ + y;
+        velocity_ = v;
+        if (t > 0.03 && std::abs(y) <= params_.pos_eps && std::abs(v) <= params_.vel_eps) {
+            snap(target_);
+        }
+        return value_;
+    }
+
+    // Smooth bounded squash-and-stretch magnitude derived from velocity.
+    [[nodiscard]] float stretch(float velocity_scale = 0.00055f, float max_stretch = 0.24f) const noexcept {
+        if (!active_ || max_stretch <= 0.f) return 0.f;
+        const float raw = static_cast<float>(std::abs(velocity_)) * velocity_scale;
+        return max_stretch * std::tanh(raw / max_stretch);
+    }
+
+    [[nodiscard]] double value() const noexcept { return value_; }
+    [[nodiscard]] double velocity() const noexcept { return velocity_; }
+    [[nodiscard]] double target() const noexcept { return target_; }
+    [[nodiscard]] bool active() const noexcept { return active_; }
+
+private:
+    Params params_{};
+    double value_ = 0.0, velocity_ = 0.0, target_ = 0.0;
+    double y0_ = 0.0, v0_ = 0.0;
+    MotionClock::time_point start_{};
+    bool active_ = false;
+};
 
 // Finite scalar tween sampled at absolute monotonic times, never integrated per frame.
 class Tween {
@@ -76,9 +236,9 @@ private:
     bool active_ = false;
 };
 
-// Two phase page transition: the outgoing page fades and lifts away, then the
-// incoming page settles into place. Only one page is ever drawn, so every
-// ImGui widget keeps its identity and state; the choreography lives here.
+// Two phase page transition: the outgoing page fades and glides away, then the
+// incoming page slides in with a soft liquid spring settle. Only one page is
+// ever drawn, so every ImGui widget keeps its identity and state.
 class PageTransition {
 public:
     enum class Phase { Idle, Out, In };
@@ -86,17 +246,20 @@ public:
         displayed_ = std::move(key);
         target_ = displayed_;
         phase_ = Phase::Idle;
+        direction_ = 0;
         tween_.finish();
         tween_.start(1.0, 1.0, MotionClock::time_point{}, std::chrono::duration<double>{});
     }
-    // Call once per frame with the desired key. Returns true when the
+    // Call once per frame with the desired key. direction: -1 slides from left,
+    // +1 slides from right, 0 glides vertically. Returns true when the
     // displayed key changed during this call (the frame should swap content).
     bool update(const std::string& desired, MotionClock::time_point now, double out_seconds,
-                double in_seconds, bool reduced_motion) {
+                double in_seconds, bool reduced_motion, int direction = 0) {
         if (desired == target_) {
             if (phase_ == Phase::Idle) return false;
         } else {
             target_ = desired;
+            direction_ = direction;
             if (reduced_motion) {
                 const bool changed = displayed_ != target_;
                 displayed_ = target_;
@@ -117,7 +280,7 @@ public:
                 displayed_ = target_;
                 phase_ = Phase::In;
                 tween_.start(0.0, 1.0, now, std::chrono::duration<double>(in_seconds),
-                             Easing::EaseOutQuint, reduced_motion);
+                             Easing::LiquidSpring, reduced_motion);
                 return changed;
             }
         } else if (phase_ == Phase::In) {
@@ -130,14 +293,21 @@ public:
         if (phase_ == Phase::Idle) return 1.f;
         return static_cast<float>(std::clamp(tween_.value(), 0.0, 1.0));
     }
+    // Unclamped incoming progress (allows the subtle LiquidSpring overshoot).
+    [[nodiscard]] float progress() const noexcept {
+        if (phase_ == Phase::Idle) return 1.f;
+        return static_cast<float>(tween_.value());
+    }
     // Distance travelled by the outgoing page (fades away while drifting).
     [[nodiscard]] float outgoing_offset(float distance) const noexcept {
         return phase_ == Phase::Out ? (1.f - alpha()) * distance : 0.f;
     }
-    // Distance still to travel by the incoming page (starts offset, settles at 0).
+    // Distance still to travel by the incoming page (starts offset, settles at 0
+    // with a gentle liquid spring rebound).
     [[nodiscard]] float incoming_offset(float distance) const noexcept {
-        return phase_ == Phase::In ? (1.f - alpha()) * distance : 0.f;
+        return phase_ == Phase::In ? (1.f - progress()) * distance : 0.f;
     }
+    [[nodiscard]] int direction() const noexcept { return direction_; }
     [[nodiscard]] bool active() const noexcept { return phase_ != Phase::Idle; }
     [[nodiscard]] Phase phase() const noexcept { return phase_; }
     [[nodiscard]] const std::string& displayed() const noexcept { return displayed_; }
@@ -145,6 +315,7 @@ public:
 private:
     std::string displayed_, target_;
     Phase phase_ = Phase::Idle;
+    int direction_ = 0;
     Tween tween_{1.0};
 };
 

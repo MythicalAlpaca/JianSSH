@@ -1,13 +1,13 @@
 #pragma once
 // Single source of truth for every colour the interface draws.
 //
-// The palette follows the macOS system appearance: neutral, slightly warm
-// greys, translucent control fills, hairline separators and the system blue
-// accent. The dark and light presets are generated from one field list, so a
-// slot can never exist in one theme and be forgotten in the other. Everything
-// the UI paints - ImGui widgets, hand drawn rows, the terminal and the charts
-// - reads from the same palette instance, which is what makes a smooth theme
-// switch possible.
+// The palette implements a macOS-inspired Liquid Glass appearance: translucent
+// frosted panels, directional specular glass rims, subtle ambient backdrop
+// blooms and luminous system-blue accents. The dark and light presets are
+// generated from one field list, so a slot can never exist in one theme and be
+// forgotten in the other. Everything the UI paints - ImGui widgets, hand drawn
+// rows, vector icons, the terminal and glass surfaces - reads from the same
+// palette instance, enabling smooth theme transitions.
 #include "jianssh/ui/workspace.hpp"
 #include "jianssh/ui/system_theme.hpp"
 #include <imgui.h>
@@ -96,7 +96,19 @@ namespace jianssh::ui {
     X(terminal_cursor) \
     X(chart_bg) \
     X(chart_line) \
-    X(chart_grid)
+    X(chart_grid) \
+    X(glass_bg) \
+    X(glass_bg_strong) \
+    X(glass_bg_subtle) \
+    X(glass_highlight) \
+    X(glass_rim_top) \
+    X(glass_rim_bottom) \
+    X(glass_glow_a) \
+    X(glass_glow_b) \
+    X(glass_glow_c) \
+    X(folder_back) \
+    X(folder_front_top) \
+    X(folder_front_bottom)
 
 struct Theme {
 #define JIANSSH_THEME_FIELD(name) ImU32 name = 0;
@@ -146,192 +158,216 @@ inline Theme lerp_theme(const Theme& a, const Theme& b, float t) noexcept {
     return out;
 }
 
-// macOS dark appearance: #1E1E20 window, #2C2C2F elevated surfaces and the
-// system blue accent (#0A84FF). Control fills are translucent white, the way
-// AppKit composes materials over a window background.
+// High-contrast Liquid Glass dark appearance: deep obsidian-midnight canvas
+// with luminous aurora blooms, frosted high-contrast glass panels, crisp
+// specular rims and WCAG AAA text legibility.
 inline Theme dark_theme() {
     Theme t;
 #define JIANSSH_THEME_SET(name) t.name = 0;
     JIANSSH_THEME_FIELDS(JIANSSH_THEME_SET)
 #undef JIANSSH_THEME_SET
-    t.window_bg = IM_COL32(30, 30, 32, 255);
-    t.child_bg = IM_COL32(38, 38, 41, 255);
-    t.sidebar_bg = IM_COL32(35, 35, 38, 255);
-    t.card_bg = IM_COL32(43, 43, 46, 255);
-    t.card_bg_alt = IM_COL32(50, 50, 53, 255);
-    t.popup_bg = IM_COL32(44, 44, 47, 255);
-    t.border = IM_COL32(255, 255, 255, 26);
-    t.border_shadow = IM_COL32(0, 0, 0, 110);
-    t.shadow = IM_COL32(0, 0, 0, 78);
-    t.separator = IM_COL32(84, 84, 88, 120);
-    t.separator_hovered = IM_COL32(10, 132, 255, 255);
-    t.separator_active = IM_COL32(0, 100, 210, 255);
-    t.text = IM_COL32(245, 245, 247, 255);
-    t.text_disabled = IM_COL32(142, 142, 147, 255);
-    t.text_link = IM_COL32(64, 156, 255, 255);
-    t.text_selected_bg = IM_COL32(10, 132, 255, 90);
-    t.frame_bg = IM_COL32(118, 118, 128, 48);
-    t.frame_hovered = IM_COL32(118, 118, 128, 70);
-    t.frame_active = IM_COL32(118, 118, 128, 92);
-    t.title_bg = IM_COL32(44, 44, 47, 255);
-    t.title_bg_active = IM_COL32(44, 44, 47, 255);
-    t.title_bg_collapsed = IM_COL32(40, 40, 43, 255);
-    t.menu_bar_bg = IM_COL32(34, 34, 37, 255);
+    t.window_bg = IM_COL32(9, 13, 22, 255);
+    t.child_bg = IM_COL32(18, 24, 38, 206);
+    t.sidebar_bg = IM_COL32(20, 27, 42, 198);
+    t.card_bg = IM_COL32(26, 35, 54, 196);
+    t.card_bg_alt = IM_COL32(42, 54, 80, 220);
+    t.popup_bg = IM_COL32(19, 26, 42, 244);
+    t.border = IM_COL32(212, 232, 255, 78);
+    t.border_shadow = IM_COL32(0, 4, 12, 145);
+    t.shadow = IM_COL32(0, 4, 14, 124);
+    t.separator = IM_COL32(186, 214, 255, 84);
+    t.separator_hovered = IM_COL32(56, 168, 255, 255);
+    t.separator_active = IM_COL32(20, 126, 242, 255);
+    t.text = IM_COL32(250, 252, 255, 255);
+    t.text_disabled = IM_COL32(142, 157, 184, 255);
+    t.text_link = IM_COL32(98, 186, 255, 255);
+    t.text_selected_bg = IM_COL32(30, 150, 255, 118);
+    t.frame_bg = IM_COL32(176, 204, 248, 44);
+    t.frame_hovered = IM_COL32(196, 220, 255, 68);
+    t.frame_active = IM_COL32(210, 232, 255, 92);
+    t.title_bg = IM_COL32(24, 33, 52, 248);
+    t.title_bg_active = IM_COL32(28, 39, 62, 250);
+    t.title_bg_collapsed = IM_COL32(20, 27, 42, 240);
+    t.menu_bar_bg = IM_COL32(20, 27, 42, 235);
     t.scrollbar_bg = IM_COL32(0, 0, 0, 0);
-    t.scrollbar_grab = IM_COL32(255, 255, 255, 44);
-    t.scrollbar_grab_hovered = IM_COL32(255, 255, 255, 92);
-    t.scrollbar_grab_active = IM_COL32(255, 255, 255, 128);
-    t.check_mark = IM_COL32(10, 132, 255, 255);
-    t.slider_grab = IM_COL32(10, 132, 255, 255);
-    t.slider_grab_active = IM_COL32(0, 100, 210, 255);
-    t.button = IM_COL32(118, 118, 128, 46);
-    t.button_hovered = IM_COL32(118, 118, 128, 70);
-    t.button_active = IM_COL32(118, 118, 128, 96);
-    t.header = IM_COL32(10, 132, 255, 54);
-    t.header_hovered = IM_COL32(255, 255, 255, 18);
-    t.header_active = IM_COL32(10, 132, 255, 78);
+    t.scrollbar_grab = IM_COL32(226, 240, 255, 74);
+    t.scrollbar_grab_hovered = IM_COL32(232, 244, 255, 128);
+    t.scrollbar_grab_active = IM_COL32(242, 250, 255, 172);
+    t.check_mark = IM_COL32(64, 178, 255, 255);
+    t.slider_grab = IM_COL32(46, 164, 255, 255);
+    t.slider_grab_active = IM_COL32(20, 126, 242, 255);
+    t.button = IM_COL32(190, 214, 255, 52);
+    t.button_hovered = IM_COL32(210, 230, 255, 84);
+    t.button_active = IM_COL32(222, 238, 255, 110);
+    t.header = IM_COL32(30, 150, 255, 84);
+    t.header_hovered = IM_COL32(225, 240, 255, 36);
+    t.header_active = IM_COL32(30, 150, 255, 118);
     t.tab = IM_COL32(255, 255, 255, 0);
-    t.tab_hovered = IM_COL32(255, 255, 255, 14);
-    t.tab_selected = IM_COL32(58, 58, 61, 255);
-    t.tab_selected_overline = IM_COL32(10, 132, 255, 255);
+    t.tab_hovered = IM_COL32(225, 240, 255, 30);
+    t.tab_selected = IM_COL32(68, 92, 134, 186);
+    t.tab_selected_overline = IM_COL32(64, 178, 255, 255);
     t.tab_dimmed = IM_COL32(255, 255, 255, 0);
-    t.tab_dimmed_selected = IM_COL32(48, 48, 51, 255);
-    t.tab_dimmed_selected_overline = IM_COL32(10, 132, 255, 130);
-    t.resize_grip = IM_COL32(255, 255, 255, 26);
-    t.resize_grip_hovered = IM_COL32(10, 132, 255, 220);
-    t.resize_grip_active = IM_COL32(10, 132, 255, 255);
-    t.plot_lines = IM_COL32(255, 255, 255, 34);
-    t.plot_lines_hovered = IM_COL32(10, 132, 255, 255);
-    t.plot_histogram = IM_COL32(10, 132, 255, 220);
-    t.plot_histogram_hovered = IM_COL32(64, 156, 255, 255);
-    t.table_header_bg = IM_COL32(255, 255, 255, 12);
-    t.table_border_strong = IM_COL32(255, 255, 255, 30);
-    t.table_border_light = IM_COL32(255, 255, 255, 14);
+    t.tab_dimmed_selected = IM_COL32(48, 64, 94, 158);
+    t.tab_dimmed_selected_overline = IM_COL32(64, 178, 255, 150);
+    t.resize_grip = IM_COL32(220, 236, 255, 48);
+    t.resize_grip_hovered = IM_COL32(46, 164, 255, 235);
+    t.resize_grip_active = IM_COL32(46, 164, 255, 255);
+    t.plot_lines = IM_COL32(220, 236, 255, 58);
+    t.plot_lines_hovered = IM_COL32(46, 164, 255, 255);
+    t.plot_histogram = IM_COL32(46, 164, 255, 232);
+    t.plot_histogram_hovered = IM_COL32(94, 188, 255, 255);
+    t.table_header_bg = IM_COL32(198, 222, 255, 32);
+    t.table_border_strong = IM_COL32(204, 228, 255, 62);
+    t.table_border_light = IM_COL32(204, 228, 255, 28);
     t.table_row_bg = IM_COL32(255, 255, 255, 0);
-    t.table_row_bg_alt = IM_COL32(255, 255, 255, 6);
-    t.drag_drop_target = IM_COL32(10, 132, 255, 190);
-    t.nav_cursor = IM_COL32(10, 132, 255, 255);
-    t.nav_windowing_highlight = IM_COL32(10, 132, 255, 190);
-    t.nav_windowing_dim_bg = IM_COL32(0, 0, 0, 120);
-    t.modal_dim_bg = IM_COL32(0, 0, 0, 130);
-    t.ink = IM_COL32(245, 245, 247, 255);
-    t.muted = IM_COL32(152, 152, 157, 255);
-    t.accent = IM_COL32(10, 132, 255, 255);
-    t.accent_hover = IM_COL32(64, 156, 255, 255);
-    t.accent_active = IM_COL32(0, 100, 210, 255);
-    t.accent_soft = IM_COL32(10, 132, 255, 38);
-    t.surface = IM_COL32(44, 44, 47, 255);
-    t.danger = IM_COL32(255, 69, 58, 255);
-    t.warning = IM_COL32(255, 159, 10, 255);
-    t.success = IM_COL32(48, 209, 88, 255);
-    t.info = IM_COL32(100, 210, 255, 255);
-    t.terminal_bg = IM_COL32(24, 24, 26, 255);
-    t.terminal_fg = IM_COL32(232, 232, 237, 255);
-    t.terminal_cursor = IM_COL32(10, 132, 255, 255);
-    t.chart_bg = IM_COL32(32, 32, 34, 255);
-    t.chart_line = IM_COL32(10, 132, 255, 255);
-    t.chart_grid = IM_COL32(255, 255, 255, 26);
-    t.ansi = {IM_COL32(30, 30, 32, 255),   IM_COL32(255, 107, 106, 255), IM_COL32(79, 214, 124, 255),
-              IM_COL32(240, 198, 116, 255), IM_COL32(90, 167, 255, 255),  IM_COL32(201, 139, 255, 255),
-              IM_COL32(95, 224, 230, 255),  IM_COL32(232, 232, 237, 255), IM_COL32(110, 110, 118, 255),
-              IM_COL32(255, 137, 133, 255), IM_COL32(116, 232, 154, 255), IM_COL32(255, 214, 138, 255),
-              IM_COL32(135, 190, 255, 255), IM_COL32(220, 169, 255, 255), IM_COL32(138, 240, 244, 255),
+    t.table_row_bg_alt = IM_COL32(210, 232, 255, 12);
+    t.drag_drop_target = IM_COL32(58, 174, 255, 225);
+    t.nav_cursor = IM_COL32(64, 178, 255, 255);
+    t.nav_windowing_highlight = IM_COL32(64, 178, 255, 220);
+    t.nav_windowing_dim_bg = IM_COL32(4, 8, 16, 152);
+    t.modal_dim_bg = IM_COL32(4, 8, 16, 164);
+    t.ink = IM_COL32(250, 252, 255, 255);
+    t.muted = IM_COL32(186, 198, 220, 255);
+    t.accent = IM_COL32(30, 150, 255, 255);
+    t.accent_hover = IM_COL32(84, 180, 255, 255);
+    t.accent_active = IM_COL32(14, 114, 224, 255);
+    t.accent_soft = IM_COL32(30, 150, 255, 62);
+    t.surface = IM_COL32(42, 54, 80, 224);
+    t.danger = IM_COL32(255, 82, 82, 255);
+    t.warning = IM_COL32(255, 184, 48, 255);
+    t.success = IM_COL32(48, 232, 122, 255);
+    t.info = IM_COL32(92, 225, 255, 255);
+    t.terminal_bg = IM_COL32(11, 15, 25, 246);
+    t.terminal_fg = IM_COL32(242, 246, 255, 255);
+    t.terminal_cursor = IM_COL32(64, 178, 255, 255);
+    t.chart_bg = IM_COL32(18, 24, 38, 215);
+    t.chart_line = IM_COL32(64, 178, 255, 255);
+    t.chart_grid = IM_COL32(204, 228, 255, 40);
+    t.glass_bg = IM_COL32(26, 35, 54, 192);
+    t.glass_bg_strong = IM_COL32(48, 63, 94, 220);
+    t.glass_bg_subtle = IM_COL32(12, 18, 30, 168);
+    t.glass_highlight = IM_COL32(236, 246, 255, 58);
+    t.glass_rim_top = IM_COL32(244, 250, 255, 148);
+    t.glass_rim_bottom = IM_COL32(116, 172, 255, 62);
+    t.glass_glow_a = IM_COL32(30, 148, 255, 92);
+    t.glass_glow_b = IM_COL32(142, 92, 255, 76);
+    t.glass_glow_c = IM_COL32(24, 218, 240, 62);
+    t.folder_back = IM_COL32(26, 123, 232, 255);
+    t.folder_front_top = IM_COL32(104, 206, 255, 255);
+    t.folder_front_bottom = IM_COL32(27, 132, 255, 255);
+    t.ansi = {IM_COL32(24, 30, 44, 255),   IM_COL32(255, 102, 108, 255), IM_COL32(68, 232, 136, 255),
+              IM_COL32(255, 208, 96, 255), IM_COL32(92, 178, 255, 255),  IM_COL32(208, 142, 255, 255),
+              IM_COL32(82, 232, 245, 255), IM_COL32(242, 246, 255, 255), IM_COL32(130, 144, 170, 255),
+              IM_COL32(255, 136, 140, 255), IM_COL32(118, 245, 168, 255), IM_COL32(255, 224, 134, 255),
+              IM_COL32(138, 202, 255, 255), IM_COL32(226, 176, 255, 255), IM_COL32(132, 244, 252, 255),
               IM_COL32(255, 255, 255, 255)};
     t.dark = true;
     return t;
 }
 
-// macOS light appearance: #F2F2F7 window, white cards and the light system
-// blue accent (#007AFF). Borders and control fills are a fraction of black so
-// surfaces stay airy instead of greyed out.
+// High-contrast Liquid Glass light appearance: luminous porcelain-glacier sky
+// backdrop with cerulean and violet glows, frosted crystal white cards, crisp
+// slate-rimmed controls and deep obsidian ink typography.
 inline Theme light_theme() {
     Theme t;
 #define JIANSSH_THEME_SET(name) t.name = 0;
     JIANSSH_THEME_FIELDS(JIANSSH_THEME_SET)
 #undef JIANSSH_THEME_SET
-    t.window_bg = IM_COL32(242, 242, 247, 255);
-    t.child_bg = IM_COL32(255, 255, 255, 246);
-    t.sidebar_bg = IM_COL32(246, 246, 249, 255);
-    t.card_bg = IM_COL32(255, 255, 255, 255);
-    t.card_bg_alt = IM_COL32(249, 249, 251, 255);
-    t.popup_bg = IM_COL32(255, 255, 255, 255);
-    t.border = IM_COL32(60, 60, 67, 38);
-    t.border_shadow = IM_COL32(0, 0, 0, 34);
-    t.shadow = IM_COL32(0, 0, 0, 22);
-    t.separator = IM_COL32(60, 60, 67, 44);
-    t.separator_hovered = IM_COL32(0, 122, 255, 255);
-    t.separator_active = IM_COL32(0, 98, 204, 255);
-    t.text = IM_COL32(29, 29, 31, 255);
-    t.text_disabled = IM_COL32(142, 142, 147, 255);
-    t.text_link = IM_COL32(0, 122, 255, 255);
-    t.text_selected_bg = IM_COL32(0, 122, 255, 54);
-    t.frame_bg = IM_COL32(118, 118, 128, 28);
-    t.frame_hovered = IM_COL32(118, 118, 128, 44);
-    t.frame_active = IM_COL32(118, 118, 128, 62);
-    t.title_bg = IM_COL32(255, 255, 255, 255);
-    t.title_bg_active = IM_COL32(255, 255, 255, 255);
-    t.title_bg_collapsed = IM_COL32(250, 250, 252, 255);
-    t.menu_bar_bg = IM_COL32(250, 250, 252, 255);
+    t.window_bg = IM_COL32(214, 226, 245, 255);
+    t.child_bg = IM_COL32(252, 254, 255, 208);
+    t.sidebar_bg = IM_COL32(246, 250, 255, 200);
+    t.card_bg = IM_COL32(255, 255, 255, 202);
+    t.card_bg_alt = IM_COL32(238, 246, 255, 232);
+    t.popup_bg = IM_COL32(252, 254, 255, 246);
+    t.border = IM_COL32(38, 66, 114, 82);
+    t.border_shadow = IM_COL32(18, 36, 72, 42);
+    t.shadow = IM_COL32(20, 40, 82, 44);
+    t.separator = IM_COL32(42, 72, 122, 78);
+    t.separator_hovered = IM_COL32(0, 98, 230, 255);
+    t.separator_active = IM_COL32(0, 75, 184, 255);
+    t.text = IM_COL32(15, 23, 42, 255);
+    t.text_disabled = IM_COL32(100, 116, 139, 255);
+    t.text_link = IM_COL32(0, 98, 230, 255);
+    t.text_selected_bg = IM_COL32(0, 98, 230, 72);
+    t.frame_bg = IM_COL32(204, 219, 242, 154);
+    t.frame_hovered = IM_COL32(218, 232, 252, 192);
+    t.frame_active = IM_COL32(255, 255, 255, 248);
+    t.title_bg = IM_COL32(238, 245, 255, 246);
+    t.title_bg_active = IM_COL32(244, 249, 255, 250);
+    t.title_bg_collapsed = IM_COL32(236, 244, 255, 238);
+    t.menu_bar_bg = IM_COL32(240, 246, 255, 236);
     t.scrollbar_bg = IM_COL32(0, 0, 0, 0);
-    t.scrollbar_grab = IM_COL32(0, 0, 0, 40);
-    t.scrollbar_grab_hovered = IM_COL32(0, 0, 0, 76);
-    t.scrollbar_grab_active = IM_COL32(0, 0, 0, 108);
-    t.check_mark = IM_COL32(0, 122, 255, 255);
-    t.slider_grab = IM_COL32(0, 122, 255, 255);
-    t.slider_grab_active = IM_COL32(0, 98, 204, 255);
-    t.button = IM_COL32(118, 118, 128, 30);
-    t.button_hovered = IM_COL32(118, 118, 128, 46);
-    t.button_active = IM_COL32(118, 118, 128, 64);
-    t.header = IM_COL32(0, 122, 255, 34);
-    t.header_hovered = IM_COL32(0, 0, 0, 10);
-    t.header_active = IM_COL32(0, 122, 255, 52);
+    t.scrollbar_grab = IM_COL32(34, 58, 102, 78);
+    t.scrollbar_grab_hovered = IM_COL32(34, 58, 102, 126);
+    t.scrollbar_grab_active = IM_COL32(34, 58, 102, 168);
+    t.check_mark = IM_COL32(0, 98, 230, 255);
+    t.slider_grab = IM_COL32(0, 98, 230, 255);
+    t.slider_grab_active = IM_COL32(0, 75, 184, 255);
+    t.button = IM_COL32(226, 237, 254, 218);
+    t.button_hovered = IM_COL32(208, 226, 254, 240);
+    t.button_active = IM_COL32(184, 212, 252, 250);
+    t.header = IM_COL32(0, 98, 230, 56);
+    t.header_hovered = IM_COL32(22, 62, 130, 26);
+    t.header_active = IM_COL32(0, 98, 230, 82);
     t.tab = IM_COL32(0, 0, 0, 0);
-    t.tab_hovered = IM_COL32(0, 0, 0, 10);
-    t.tab_selected = IM_COL32(255, 255, 255, 255);
-    t.tab_selected_overline = IM_COL32(0, 122, 255, 255);
+    t.tab_hovered = IM_COL32(255, 255, 255, 155);
+    t.tab_selected = IM_COL32(255, 255, 255, 244);
+    t.tab_selected_overline = IM_COL32(0, 98, 230, 255);
     t.tab_dimmed = IM_COL32(0, 0, 0, 0);
-    t.tab_dimmed_selected = IM_COL32(255, 255, 255, 235);
-    t.tab_dimmed_selected_overline = IM_COL32(0, 122, 255, 140);
-    t.resize_grip = IM_COL32(0, 0, 0, 28);
-    t.resize_grip_hovered = IM_COL32(0, 122, 255, 200);
-    t.resize_grip_active = IM_COL32(0, 98, 204, 255);
-    t.plot_lines = IM_COL32(60, 60, 67, 40);
-    t.plot_lines_hovered = IM_COL32(0, 122, 255, 255);
-    t.plot_histogram = IM_COL32(0, 122, 255, 210);
-    t.plot_histogram_hovered = IM_COL32(51, 149, 255, 255);
-    t.table_header_bg = IM_COL32(118, 118, 128, 18);
-    t.table_border_strong = IM_COL32(60, 60, 67, 38);
-    t.table_border_light = IM_COL32(60, 60, 67, 20);
+    t.tab_dimmed_selected = IM_COL32(255, 255, 255, 215);
+    t.tab_dimmed_selected_overline = IM_COL32(0, 98, 230, 155);
+    t.resize_grip = IM_COL32(34, 58, 102, 54);
+    t.resize_grip_hovered = IM_COL32(0, 98, 230, 220);
+    t.resize_grip_active = IM_COL32(0, 75, 184, 255);
+    t.plot_lines = IM_COL32(42, 68, 112, 66);
+    t.plot_lines_hovered = IM_COL32(0, 98, 230, 255);
+    t.plot_histogram = IM_COL32(0, 98, 230, 225);
+    t.plot_histogram_hovered = IM_COL32(30, 126, 255, 255);
+    t.table_header_bg = IM_COL32(212, 226, 248, 168);
+    t.table_border_strong = IM_COL32(42, 72, 122, 72);
+    t.table_border_light = IM_COL32(42, 72, 122, 36);
     t.table_row_bg = IM_COL32(255, 255, 255, 0);
-    t.table_row_bg_alt = IM_COL32(0, 0, 0, 6);
-    t.drag_drop_target = IM_COL32(0, 122, 255, 180);
-    t.nav_cursor = IM_COL32(0, 122, 255, 255);
-    t.nav_windowing_highlight = IM_COL32(0, 122, 255, 180);
-    t.nav_windowing_dim_bg = IM_COL32(0, 0, 0, 80);
-    t.modal_dim_bg = IM_COL32(0, 0, 0, 70);
-    t.ink = IM_COL32(29, 29, 31, 255);
-    t.muted = IM_COL32(110, 110, 115, 255);
-    t.accent = IM_COL32(0, 122, 255, 255);
-    t.accent_hover = IM_COL32(51, 149, 255, 255);
-    t.accent_active = IM_COL32(0, 98, 204, 255);
-    t.accent_soft = IM_COL32(0, 122, 255, 30);
-    t.surface = IM_COL32(255, 255, 255, 255);
-    t.danger = IM_COL32(255, 59, 48, 255);
-    t.warning = IM_COL32(255, 149, 0, 255);
-    t.success = IM_COL32(52, 199, 89, 255);
-    t.info = IM_COL32(0, 122, 255, 255);
-    t.terminal_bg = IM_COL32(252, 252, 253, 255);
-    t.terminal_fg = IM_COL32(29, 29, 31, 255);
-    t.terminal_cursor = IM_COL32(0, 122, 255, 255);
-    t.chart_bg = IM_COL32(255, 255, 255, 255);
-    t.chart_line = IM_COL32(0, 122, 255, 255);
-    t.chart_grid = IM_COL32(60, 60, 67, 26);
-    t.ansi = {IM_COL32(40, 44, 52, 255),   IM_COL32(215, 60, 48, 255),  IM_COL32(36, 138, 61, 255),
-              IM_COL32(190, 126, 20, 255), IM_COL32(30, 108, 200, 255), IM_COL32(148, 85, 190, 255),
-              IM_COL32(24, 140, 140, 255), IM_COL32(110, 118, 128, 255), IM_COL32(132, 140, 150, 255),
-              IM_COL32(235, 80, 70, 255),  IM_COL32(66, 168, 85, 255),  IM_COL32(220, 160, 40, 255),
-              IM_COL32(62, 134, 220, 255), IM_COL32(168, 108, 210, 255), IM_COL32(30, 160, 158, 255),
-              IM_COL32(29, 29, 31, 255)};
+    t.table_row_bg_alt = IM_COL32(26, 62, 126, 13);
+    t.drag_drop_target = IM_COL32(0, 98, 230, 215);
+    t.nav_cursor = IM_COL32(0, 98, 230, 255);
+    t.nav_windowing_highlight = IM_COL32(0, 98, 230, 210);
+    t.nav_windowing_dim_bg = IM_COL32(15, 28, 54, 116);
+    t.modal_dim_bg = IM_COL32(15, 28, 54, 118);
+    t.ink = IM_COL32(15, 23, 42, 255);
+    t.muted = IM_COL32(66, 80, 107, 255);
+    t.accent = IM_COL32(0, 98, 230, 255);
+    t.accent_hover = IM_COL32(30, 126, 255, 255);
+    t.accent_active = IM_COL32(0, 75, 184, 255);
+    t.accent_soft = IM_COL32(0, 98, 230, 48);
+    t.surface = IM_COL32(255, 255, 255, 242);
+    t.danger = IM_COL32(220, 38, 38, 255);
+    t.warning = IM_COL32(200, 109, 0, 255);
+    t.success = IM_COL32(14, 159, 78, 255);
+    t.info = IM_COL32(2, 132, 199, 255);
+    t.terminal_bg = IM_COL32(250, 252, 255, 246);
+    t.terminal_fg = IM_COL32(15, 23, 42, 255);
+    t.terminal_cursor = IM_COL32(0, 98, 230, 255);
+    t.chart_bg = IM_COL32(255, 255, 255, 224);
+    t.chart_line = IM_COL32(0, 98, 230, 255);
+    t.chart_grid = IM_COL32(42, 72, 122, 44);
+    t.glass_bg = IM_COL32(252, 254, 255, 202);
+    t.glass_bg_strong = IM_COL32(255, 255, 255, 244);
+    t.glass_bg_subtle = IM_COL32(202, 218, 242, 162);
+    t.glass_highlight = IM_COL32(255, 255, 255, 196);
+    t.glass_rim_top = IM_COL32(255, 255, 255, 250);
+    t.glass_rim_bottom = IM_COL32(38, 70, 126, 106);
+    t.glass_glow_a = IM_COL32(56, 148, 255, 112);
+    t.glass_glow_b = IM_COL32(138, 106, 255, 88);
+    t.glass_glow_c = IM_COL32(24, 198, 228, 82);
+    t.folder_back = IM_COL32(12, 99, 214, 255);
+    t.folder_front_top = IM_COL32(75, 168, 255, 255);
+    t.folder_front_bottom = IM_COL32(11, 110, 240, 255);
+    t.ansi = {IM_COL32(15, 23, 42, 255),   IM_COL32(198, 36, 36, 255),  IM_COL32(16, 126, 56, 255),
+              IM_COL32(162, 94, 0, 255),   IM_COL32(12, 86, 198, 255), IM_COL32(124, 58, 186, 255),
+              IM_COL32(8, 116, 134, 255),  IM_COL32(72, 84, 104, 255), IM_COL32(100, 116, 139, 255),
+              IM_COL32(226, 52, 52, 255),  IM_COL32(28, 152, 72, 255), IM_COL32(196, 120, 0, 255),
+              IM_COL32(30, 112, 226, 255), IM_COL32(148, 78, 212, 255), IM_COL32(14, 144, 164, 255),
+              IM_COL32(15, 23, 42, 255)};
     t.dark = false;
     return t;
 }

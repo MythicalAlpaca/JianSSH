@@ -97,9 +97,10 @@ int run_application(int argc,char**argv){
  // macOS-like UI typography: proportional sans for labels, true monospace for terminals.
  // CLI applications use line drawing, block elements, arrows and symbols outside
  // ImGui's default Latin range. Register those from the monospace face first.
+ static const ImWchar sans_ranges[]={0x0020,0x00FF,0x2000,0x206F,0};
  static const ImWchar terminal_ranges[]={0x0020,0x024F,0x0300,0x052F,0x1E00,0x1FFF,0x2000,0x2BFF,0xFFFD,0xFFFD,0};
- fonts.regular=make_font(ui_sans,sizeof(ui_sans),15.5f,body_ranges.Data,io.Fonts->GetGlyphRangesDefault());
- fonts.heading=make_font(ui_sans,sizeof(ui_sans),24.0f,heading_ranges.Data,io.Fonts->GetGlyphRangesDefault());
+ fonts.regular=make_font(ui_sans,sizeof(ui_sans),15.5f,body_ranges.Data,sans_ranges);
+ fonts.heading=make_font(ui_sans,sizeof(ui_sans),24.0f,heading_ranges.Data,sans_ranges);
   fonts.mono=add_font(mono_font,sizeof(mono_font),15.5f,terminal_ranges);
  mark("字体注册");
   std::thread font_builder([&io,&fonts]{

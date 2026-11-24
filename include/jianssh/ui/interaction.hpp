@@ -40,20 +40,20 @@ constexpr std::uint64_t anim_key(std::string_view prefix, std::uint64_t id) noex
 struct MotionTokens {
     double entrance = 0.44;
     double selection = 0.22;
-    double hover_in = 0.11;
-    double hover_out = 0.20;
-    double modal = 0.28;
-    double modal_slide = 16.0;
+    double hover_in = 0.12;
+    double hover_out = 0.22;
+    double modal = 0.30;
+    double modal_slide = 18.0;
     double theme = 0.34;
     double notice = 0.24;
     double loading_step = 0.34;
     double progress = 0.22;
-    // Page transitions: quick fade out, liquid-spring directional glide in.
-    double page_out = 0.11;
-    double page_in = 0.30;
-    double page_slide = 18.0;
-    double page_out_slide = 7.0;
-    double toggle = 0.24;
+    // Page transitions: crisp fade out, liquid-spring directional glide in.
+    double page_out = 0.10;
+    double page_in = 0.32;
+    double page_slide = 20.0;
+    double page_out_slide = 8.0;
+    double toggle = 0.26;
 };
 
 inline constexpr MotionTokens motion{};
@@ -187,9 +187,11 @@ private:
     std::unordered_map<std::uint64_t, Entry> entries_;
 };
 
-// Sliding liquid-glass capsule indicator for segmented controls, session tabs
-// and sidebar group selectors. Targets are stored in local container space so
-// window resizing never causes the indicator to fly across the screen.
+// Sliding Apple Liquid Glass droplet indicator for segmented controls, session
+// tabs, sidebar groups and device cards. Leading and trailing edges use
+// asymmetric springs so the lens organically stretches across items like real
+// liquid mercury, pinches its waist slightly to conserve volume, and snaps
+// smoothly into place within a finite settling window (0 FPS when idle).
 class LiquidPillAnimator {
 public:
     struct Rect {
@@ -197,8 +199,9 @@ public:
         float y = 0.f;
         float w = 0.f;
         float h = 0.f;
-        float stretch_x = 0.f; // >0 elongated horizontally, <0 compressed
-        float stretch_y = 0.f; // >0 elongated vertically, <0 compressed
+        float stretch_x = 0.f; // Volume-preserving cross-axis deformation
+        float stretch_y = 0.f; // Volume-preserving cross-axis deformation
+        float glint = 0.f;     // -1..+1 velocity-driven sweeping refraction highlight
         bool active = false;
     };
 
@@ -213,58 +216,102 @@ public:
 
     // Update and return the current liquid pill geometry in local coordinates.
     // selection_token changes only when the user actually switches selection;
-    // passive layout resizes snap smoothly instead of launching a jelly slide.
+    // passive layout resizes snap silently instead of launching a jelly slide.
     [[nodiscard]] Rect sample(std::uint64_t key, std::uint64_t selection_token,
                               float local_x, float local_y, float w, float h,
                               MotionClock::time_point now, bool reduced_motion) {
         Entry& e = entries_[key];
         e.last_seen = frame_;
+        const double tx1 = static_cast<double>(local_x);
+        const double ty1 = static_cast<double>(local_y);
+        const double tx2 = static_cast<double>(local_x + w);
+        const double ty2 = static_cast<double>(local_y + h);
+
+        static constexpr Spring::Params kLead{30.0, 0.72, 0.12, 0.80, 0.44};
+        static constexpr Spring::Params kTrail{19.5, 0.58, 0.12, 0.80, 0.48};
+
         if (!e.initialized) {
             e.initialized = true;
             e.selection = selection_token;
-            const Spring::Params p{22.5, 0.62, 0.14, 0.80, 0.48};
-            e.x.set_params(p);
-            e.y.set_params(p);
-            e.w.set_params({24.0, 0.68, 0.14, 0.80, 0.44});
-            e.h.set_params({24.0, 0.68, 0.14, 0.80, 0.44});
-            e.x.snap(local_x);
-            e.y.snap(local_y);
-            e.w.snap(w);
-            e.h.snap(h);
+            e.x1.set_params(kLead);
+            e.x2.set_params(kLead);
+            e.y1.set_params(kLead);
+            e.y2.set_params(kLead);
+            e.x1.snap(tx1);
+            e.x2.snap(tx2);
+            e.y1.snap(ty1);
+            e.y2.snap(ty2);
         } else if (e.selection != selection_token) {
+            const double cx1 = e.x1.update(now, reduced_motion);
+            const double cx2 = e.x2.update(now, reduced_motion);
+            const double cy1 = e.y1.update(now, reduced_motion);
+            const double cy2 = e.y2.update(now, reduced_motion);
             e.selection = selection_token;
-            e.x.retarget(local_x, now, reduced_motion);
-            e.y.retarget(local_y, now, reduced_motion);
-            e.w.retarget(w, now, reduced_motion);
-            e.h.retarget(h, now, reduced_motion);
+
+            if (tx2 > cx2 + 1.0) {
+                e.x2.set_params(kLead);
+                e.x1.set_params(kTrail);
+            } else if (tx1 < cx1 - 1.0) {
+                e.x1.set_params(kLead);
+                e.x2.set_params(kTrail);
+            } else {
+                e.x1.set_params(kLead);
+                e.x2.set_params(kLead);
+            }
+
+            if (ty2 > cy2 + 1.0) {
+                e.y2.set_params(kLead);
+                e.y1.set_params(kTrail);
+            } else if (ty1 < cy1 - 1.0) {
+                e.y1.set_params(kLead);
+                e.y2.set_params(kTrail);
+            } else {
+                e.y1.set_params(kLead);
+                e.y2.set_params(kLead);
+            }
+
+            e.x1.retarget(tx1, now, reduced_motion);
+            e.x2.retarget(tx2, now, reduced_motion);
+            e.y1.retarget(ty1, now, reduced_motion);
+            e.y2.retarget(ty2, now, reduced_motion);
         } else if (!e.active()) {
             // Layout changed (e.g. window resize) while settled: follow silently.
-            e.x.snap(local_x);
-            e.y.snap(local_y);
-            e.w.snap(w);
-            e.h.snap(h);
+            e.x1.snap(tx1);
+            e.x2.snap(tx2);
+            e.y1.snap(ty1);
+            e.y2.snap(ty2);
         } else {
             // Update destination if layout shifted mid-flight without resetting velocity.
-            if (std::abs(e.x.target() - local_x) > 0.5) e.x.retarget(local_x, now, reduced_motion);
-            if (std::abs(e.y.target() - local_y) > 0.5) e.y.retarget(local_y, now, reduced_motion);
-            if (std::abs(e.w.target() - w) > 0.5) e.w.retarget(w, now, reduced_motion);
-            if (std::abs(e.h.target() - h) > 0.5) e.h.retarget(h, now, reduced_motion);
+            if (std::abs(e.x1.target() - tx1) > 0.5) e.x1.retarget(tx1, now, reduced_motion);
+            if (std::abs(e.x2.target() - tx2) > 0.5) e.x2.retarget(tx2, now, reduced_motion);
+            if (std::abs(e.y1.target() - ty1) > 0.5) e.y1.retarget(ty1, now, reduced_motion);
+            if (std::abs(e.y2.target() - ty2) > 0.5) e.y2.retarget(ty2, now, reduced_motion);
         }
 
-        const float cx = static_cast<float>(e.x.update(now, reduced_motion));
-        const float cy = static_cast<float>(e.y.update(now, reduced_motion));
-        const float cw = static_cast<float>(e.w.update(now, reduced_motion));
-        const float ch = static_cast<float>(e.h.update(now, reduced_motion));
+        const float nx1 = static_cast<float>(e.x1.update(now, reduced_motion));
+        const float nx2 = static_cast<float>(e.x2.update(now, reduced_motion));
+        const float ny1 = static_cast<float>(e.y1.update(now, reduced_motion));
+        const float ny2 = static_cast<float>(e.y2.update(now, reduced_motion));
 
-        // Volume-preserving liquid jelly deformation driven by travel velocity.
-        float sx = 0.f, sy = 0.f;
-        if (!reduced_motion) {
-            const float hx = e.x.stretch(0.00024f, 0.18f);
-            const float vy = e.y.stretch(0.00032f, 0.16f);
-            sx = hx - vy * 0.36f;
-            sy = vy - hx * 0.42f;
+        const float left = std::min(nx1, nx2);
+        const float right = std::max(nx1, nx2);
+        const float top = std::min(ny1, ny2);
+        const float bot = std::max(ny1, ny2);
+        const float cw = std::max(4.f, right - left);
+        const float ch = std::max(4.f, bot - top);
+
+        // Volume-preserving cross-axis waist pinch + sweeping lens glint.
+        float sx = 0.f, sy = 0.f, glint = 0.f;
+        if (!reduced_motion && e.active()) {
+            const float elong_x = std::clamp((cw - w) / std::max(8.f, w), -0.14f, 0.45f);
+            const float elong_y = std::clamp((ch - h) / std::max(8.f, h), -0.14f, 0.45f);
+            sx = -elong_y * 0.14f;
+            sy = -elong_x * 0.20f;
+            const float vx = static_cast<float>(0.5 * (e.x1.velocity() + e.x2.velocity()));
+            const float vy = static_cast<float>(0.5 * (e.y1.velocity() + e.y2.velocity()));
+            glint = std::tanh((vx + vy * 0.65f) * 0.0022f);
         }
-        return {cx, cy, std::max(4.f, cw), std::max(4.f, ch), sx, sy, e.active()};
+        return {left, top, cw, ch, sx, sy, glint, e.active()};
     }
 
     [[nodiscard]] bool active() const noexcept {
@@ -275,12 +322,12 @@ public:
 
 private:
     struct Entry {
-        Spring x{0.0}, y{0.0}, w{0.0}, h{0.0};
+        Spring x1{0.0}, x2{0.0}, y1{0.0}, y2{0.0};
         std::uint64_t selection = 0;
         std::uint64_t last_seen = 0;
         bool initialized = false;
         [[nodiscard]] bool active() const noexcept {
-            return x.active() || y.active() || w.active() || h.active();
+            return x1.active() || x2.active() || y1.active() || y2.active();
         }
     };
     std::unordered_map<std::uint64_t, Entry> entries_;

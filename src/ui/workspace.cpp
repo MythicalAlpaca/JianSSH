@@ -280,38 +280,44 @@ struct Workspace::Impl {
     // directional refractive rims and elastic press/hover springs.
     void button_depth(float rounding,float hover,float press,ButtonKind kind) {
         const ImVec2 raw_a=ImGui::GetItemRectMin(),raw_b=ImGui::GetItemRectMax();
-        const float squish=std::clamp(press*1.1f,-0.6f,1.4f);
-        const ImVec2 a(raw_a.x+squish,raw_a.y+squish*0.75f);
-        const ImVec2 b(raw_b.x-squish,raw_b.y-squish*0.75f);
+        const float squish=std::clamp(press*1.15f,-0.6f,1.5f);
+        const float lift=hover*0.8f*(1.f-std::clamp(press,0.f,1.f));
+        const ImVec2 a(raw_a.x+squish,raw_a.y+squish*0.75f-lift);
+        const ImVec2 b(raw_b.x-squish,raw_b.y-squish*0.75f-lift);
+        const float r=std::min(rounding,std::min(b.x-a.x,b.y-a.y)*0.5f);
         auto* dl=ImGui::GetWindowDrawList();
         if(kind==ButtonKind::Quiet) {
             if(hover>0.01f) {
-                draw_gradient_rounded_rect(dl,a,b,fade_color(theme.accent,0.14f*hover),
-                    fade_color(theme.accent,0.06f*hover),rounding);
-                draw_glass_rim(dl,a,b,rounding,fade_color(theme.accent,0.34f*hover),
-                    fade_color(theme.accent,0.12f*hover),1.f);
+                draw_gradient_rounded_rect(dl,a,b,fade_color(theme.accent,0.16f*hover),
+                    fade_color(theme.accent,0.06f*hover),r);
+                draw_glass_rim(dl,a,b,r,fade_color(theme.accent_hover,0.46f*hover),
+                    fade_color(theme.accent,0.18f*hover),1.f,0,hover*0.4f,80.f);
             }
             return;
         }
         const bool vibrant=kind==ButtonKind::Primary||kind==ButtonKind::Danger;
-        // Soft hover aura halo around the glass capsule.
+        // Soft floating shadow + luminous hover halo around the glass capsule.
+        dl->AddRectFilled(ImVec2(a.x,a.y+1.8f),ImVec2(b.x,b.y+3.2f),
+                          fade_color(vibrant?(kind==ButtonKind::Primary?theme.accent:theme.danger):theme.shadow,
+                                     vibrant?(0.22f+0.14f*hover):(theme.dark?0.34f:0.16f)),r+0.8f);
         if(hover>0.02f) {
-            const ImU32 glow=kind==ButtonKind::Primary?theme.accent:(kind==ButtonKind::Danger?theme.danger:theme.glass_rim_top);
+            const ImU32 glow=kind==ButtonKind::Primary?theme.accent_hover:(kind==ButtonKind::Danger?theme.danger:theme.glass_rim_top);
             dl->AddRect(ImVec2(a.x-1.f,a.y-1.f),ImVec2(b.x+1.f,b.y+1.f),
-                        fade_color(glow,(vibrant?0.30f:(theme.dark?0.22f:0.32f))*hover),rounding+1.f,0,1.5f);
+                        fade_color(glow,(vibrant?0.34f:(theme.dark?0.24f:0.36f))*hover),r+1.f,0,1.4f);
         }
-        // Rounded top meniscus sheen (never spills past rounded corners).
-        const float sheen_alpha=vibrant?(0.26f+0.12f*hover):(theme.dark?0.12f+0.08f*hover:0.58f+0.18f*hover);
-        draw_glass_sheen(dl,a,b,rounding,fade_color(IM_COL32(255,255,255,255),sheen_alpha),18.f,0.42f);
-        // Directional glass rim highlight with crisp high-contrast definition.
-        const ImU32 rim_top=vibrant?fade_color(IM_COL32(255,255,255,255),0.50f+0.18f*hover)
-                                   :(theme.dark?lerp_color(theme.glass_rim_top,IM_COL32(255,255,255,255),0.22f*hover)
-                                               :lerp_color(theme.border,theme.accent,0.28f*hover));
-        const ImU32 rim_bot=vibrant?fade_color(IM_COL32(255,255,255,255),0.16f)
-                                   :theme.glass_rim_bottom;
-        draw_glass_rim(dl,a,b,rounding,rim_top,rim_bot,1.0f);
+        // Subtle perimeter dispersion contour + cursor refraction glint.
+        const float sheen_alpha=vibrant?(0.38f+0.16f*hover):(theme.dark?0.20f+0.14f*hover:0.72f+0.18f*hover);
+        draw_glass_sheen(dl,a,b,r,fade_color(IM_COL32(255,255,255,255),sheen_alpha),14.f,0.32f);
+        const ImU32 rim_tl=vibrant?fade_color(IM_COL32(255,255,255,255),0.68f+0.20f*hover)
+                                  :(theme.dark?lerp_color(theme.glass_rim_top,IM_COL32(255,255,255,255),0.28f*hover)
+                                              :IM_COL32(255,255,255,252));
+        const ImU32 rim_mid=vibrant?fade_color(IM_COL32(255,255,255,255),0.22f)
+                                   :fade_color(theme.border,theme.dark?0.48f:0.55f);
+        const ImU32 rim_br=vibrant?fade_color(IM_COL32(190,236,255,255),0.38f+0.18f*hover)
+                                  :theme.glass_rim_bottom;
+        draw_fresnel_rim(dl,a,b,r,rim_tl,rim_mid,rim_br,1.05f,hover*0.55f,90.f);
         if(ImGui::IsItemFocused()&&ImGui::GetIO().NavActive)
-            dl->AddRect(ImVec2(a.x-1.5f,a.y-1.5f),ImVec2(b.x+1.5f,b.y+1.5f),fade_color(theme.accent,0.72f),rounding+1.5f,0,1.5f);
+            dl->AddRect(ImVec2(a.x-1.5f,a.y-1.5f),ImVec2(b.x+1.5f,b.y+1.5f),fade_color(theme.accent,0.75f),r+1.5f,0,1.5f);
     }
     bool button(const char* label_text, const ImVec2& size, const char* id, ButtonKind kind=ButtonKind::Secondary) {
         const auto hs=hover_anim.state(id,now,reduced_motion);
@@ -319,52 +325,115 @@ struct Workspace::Impl {
         ImU32 base=theme.button,hover=lerp_color(theme.button,theme.button_hovered,f),active=theme.button_active;
         ImU32 text_color=theme.text;
         if(kind==ButtonKind::Primary) {
-            base=theme.accent;hover=lerp_color(theme.accent,theme.accent_hover,f);active=theme.accent_active;
+            base=fade_color(theme.accent,0.88f);
+            hover=fade_color(lerp_color(theme.accent,theme.accent_hover,0.55f+0.45f*f),0.94f);
+            active=theme.accent_active;
             text_color=IM_COL32(255,255,255,255);
         } else if(kind==ButtonKind::Danger) {
-            base=theme.danger;hover=lerp_color(theme.danger,IM_COL32(255,120,110,255),f);active=lerp_color(theme.danger,IM_COL32(180,30,24,255),0.55f);
+            base=fade_color(theme.danger,0.88f);
+            hover=fade_color(lerp_color(theme.danger,IM_COL32(255,126,120,255),f),0.94f);
+            active=lerp_color(theme.danger,IM_COL32(180,30,24,255),0.55f);
             text_color=IM_COL32(255,255,255,255);
         } else if(kind==ButtonKind::Quiet) {
             base=IM_COL32(0,0,0,0);hover=fade_color(theme.accent,0.10f*f);active=fade_color(theme.accent,0.18f);
-            text_color=theme.accent;
+            text_color=theme.dark?theme.accent_hover:theme.accent;
         }
+        const float eff_h=size.y>1.f?size.y:ImGui::GetFrameHeight();
+        const float r=eff_h*0.5f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,r);
         ImGui::PushStyleColor(ImGuiCol_Text,tone(text_color));
         ImGui::PushStyleColor(ImGuiCol_Button,tone(lerp_color(base,hover,f*0.65f)));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,tone(hover));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,tone(active));
         const bool pressed=ImGui::Button(label_text,size);
-        button_depth(layout.frame_rounding,f,hs.press,kind);
+        button_depth(r,f,hs.press,kind);
         ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar();
         hover_anim.observe(id,ImGui::IsItemHovered(),now,reduced_motion,ImGui::IsItemActive());
         return pressed;
     }
     bool small_button(const char* label_text, const char* id) {
         const auto hs=hover_anim.state(id,now,reduced_motion);
         const float f=hs.hover;
+        const float r=12.f;
         ImGui::PushStyleColor(ImGuiCol_Button,tone(lerp_color(theme.button,theme.button_hovered,f*0.65f)));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,tone(lerp_color(theme.button,theme.button_hovered,f)));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive,tone(theme.button_active));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,7.f);
-        const bool pressed=ImGui::SmallButton(label_text);
-        button_depth(7.f,f,hs.press,ButtonKind::Secondary);
-        ImGui::PopStyleVar();
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,r);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(10.f,3.f));
+        const bool pressed=ImGui::Button(label_text);
+        button_depth(r,f,hs.press,ButtonKind::Secondary);
+        ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(3);
         hover_anim.observe(id,ImGui::IsItemHovered(),now,reduced_motion,ImGui::IsItemActive());
         return pressed;
+    }
+    bool icon_button(NavIcon icon, const char* tooltip, const char* id, float size=28.f) {
+        const auto hs=hover_anim.state(id,now,reduced_motion);
+        const float f=hs.hover;
+        const ImVec2 pos=ImGui::GetCursorScreenPos();
+        ImGui::PushID(id);
+        const bool clicked=ImGui::InvisibleButton("##ibtn",ImVec2(size,size));
+        const bool hov=ImGui::IsItemHovered();
+        const bool act=ImGui::IsItemActive();
+        ImGui::PopID();
+        hover_anim.observe(id,hov,now,reduced_motion,act);
+        const float squish=std::clamp(hs.press*1.1f,-0.5f,1.2f);
+        const float lift=f*0.7f*(1.f-std::clamp(hs.press,0.f,1.f));
+        const ImVec2 a(pos.x+squish,pos.y+squish-lift);
+        const ImVec2 b(pos.x+size-squish,pos.y+size-squish-lift);
+        const float r=(b.y-a.y)*0.5f;
+        auto* dl=ImGui::GetWindowDrawList();
+        const float alpha_mul=ImGui::GetStyle().Alpha;
+        dl->AddRectFilled(ImVec2(a.x,a.y+1.5f),ImVec2(b.x,b.y+2.5f),
+                          fade_color(theme.shadow,(theme.dark?0.30f:0.15f)*alpha_mul),r);
+        draw_gradient_rounded_rect(dl,a,b,
+            fade_color(lerp_color(theme.button,theme.button_hovered,f),alpha_mul),
+            fade_color(lerp_color(theme.frame_bg,theme.button_hovered,f*0.7f),alpha_mul),r);
+        draw_fresnel_rim(dl,a,b,r,
+            fade_color(theme.dark?theme.glass_rim_top:IM_COL32(255,255,255,255),(0.80f+0.20f*f)*alpha_mul),
+            fade_color(theme.border,0.45f*alpha_mul),
+            fade_color(theme.glass_rim_bottom,0.85f*alpha_mul),1.0f,f*0.5f,64.f);
+        const ImU32 ic=fade_color(lerp_color(theme.muted,theme.ink,0.55f+0.45f*f),alpha_mul);
+        draw_nav_icon(dl,ImVec2((a.x+b.x)*0.5f,(a.y+b.y)*0.5f),size*0.48f,icon,ic);
+        if(hov&&tooltip&&*tooltip)ImGui::SetTooltip("%s",tooltip);
+        return clicked;
+    }
+    bool pill_chip(const char* label_text, bool* value, const char* id, float height=28.f) {
+        const auto hs=hover_anim.state(id,now,reduced_motion);
+        const float f=hs.hover;
+        const bool on=*value;
+        const float text_w=ImGui::CalcTextSize(label_text).x;
+        const float w=text_w+28.f;
+        const ImVec2 pos=ImGui::GetCursorScreenPos();
+        ImGui::PushID(id);
+        const bool clicked=ImGui::InvisibleButton("##chip",ImVec2(w,height));
+        if(clicked)*value=!*value;
+        const bool hov=ImGui::IsItemHovered();
+        const bool act=ImGui::IsItemActive();
+        ImGui::PopID();
+        hover_anim.observe(id,hov,now,reduced_motion,act);
+        const ImVec2 b(pos.x+w,pos.y+height);
+        const float r=height*0.5f;
+        auto* dl=ImGui::GetWindowDrawList();
+        if(on) {
+            draw_jelly_pill(dl,pos,b,r,0.f,0.f,theme,true,1.f,0.f);
+        } else {
+            draw_glass_well(dl,pos,b,r,theme,f,false);
+        }
+        const ImVec2 dot_c(pos.x+10.5f,pos.y+height*0.5f);
+        dl->AddCircleFilled(dot_c,3.0f,on?(theme.dark?theme.accent_hover:theme.accent):fade_color(theme.muted,0.55f),12);
+        dl->AddText(ImVec2(pos.x+17.5f,pos.y+(height-ImGui::GetFontSize())*0.5f),
+                    on?theme.ink:lerp_color(theme.muted,theme.ink,0.45f*f),label_text);
+        return clicked;
     }
     bool selectable(const char* label_text, bool selected, int flags, const ImVec2& size, const char* id, bool draw_selected_bg=true) {
         const std::uint64_t key=anim_key(id);
         const float f=hover_anim.factor(key,now,reduced_motion);
         const bool visible=label_text[0]!='#';
-        if(visible) {
-            ImGui::PushStyleColor(ImGuiCol_Header,IM_COL32(0,0,0,0));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered,IM_COL32(0,0,0,0));
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive,IM_COL32(0,0,0,0));
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Header,IM_COL32(0,0,0,0));
-            ImGui::PushStyleColor(ImGuiCol_HeaderHovered,IM_COL32(0,0,0,0));
-            ImGui::PushStyleColor(ImGuiCol_HeaderActive,IM_COL32(0,0,0,0));
-        }
+        ImGui::PushStyleColor(ImGuiCol_Header,IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,IM_COL32(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,IM_COL32(0,0,0,0));
         const bool compact=visible&&size.x>0.f;
         if(compact) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(0,0));
@@ -378,16 +447,16 @@ struct Workspace::Impl {
         if(visible) {
             const ImVec2 a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();
             const float width=std::max(1.f,b.x-a.x);
+            const float rounding=std::min(15.f,(b.y-a.y)*0.5f);
             auto* dl=ImGui::GetWindowDrawList();
-            constexpr float rounding=9.f;
             if(selected&&draw_selected_bg) {
                 draw_jelly_pill(dl,a,b,rounding,0.f,0.f,theme,true);
             } else if(!selected&&f>0.01f) {
-                dl->AddRectFilled(a,b,fade_color(theme.ink,theme.dark?0.06f*f:0.045f*f),rounding);
-                draw_glass_rim(dl,a,b,rounding,fade_color(theme.glass_rim_top,0.35f*f),
-                               fade_color(theme.glass_rim_bottom,0.25f*f),0.9f);
+                dl->AddRectFilled(a,b,fade_color(theme.ink,theme.dark?0.06f*f:0.055f*f),rounding);
+                draw_glass_rim(dl,a,b,rounding,fade_color(theme.glass_rim_top,0.40f*f),
+                               fade_color(theme.glass_rim_bottom,0.28f*f),0.95f,0,f*0.4f,80.f);
             }
-            const float inset=11.f;
+            const float inset=13.f;
             if(ImGui::GetFont()) {
                 const std::string shown=elide(ImGui::GetFont(),ImGui::GetFontSize(),label_text,std::max(10.f,width-inset*2.f));
                 const float item_height=std::max(ImGui::GetFontSize(),b.y-a.y);
@@ -407,22 +476,28 @@ struct Workspace::Impl {
     void end_frame_widget(const char* id) {
         const bool hovered_item=ImGui::IsItemHovered();
         const bool active_item=ImGui::IsItemActive();
+        const float f=hover_anim.factor(id,now,reduced_motion);
         const ImVec2 a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();
+        const float h=b.y-a.y;
+        const float r=h>44.f?14.f:std::min(layout.frame_rounding,h*0.5f);
         auto* dl=ImGui::GetWindowDrawList();
         if(active_item) {
-            dl->AddRect(ImVec2(a.x-1.f,a.y-1.f),ImVec2(b.x+1.f,b.y+1.f),fade_color(theme.accent,0.78f),layout.frame_rounding+1.f,0,1.5f);
+            dl->AddRect(ImVec2(a.x-1.f,a.y-1.f),ImVec2(b.x+1.f,b.y+1.f),fade_color(theme.accent,0.82f),r+1.f,0,1.5f);
         } else {
-            draw_glass_rim(dl,a,b,layout.frame_rounding,fade_color(theme.border,0.95f),
-                           fade_color(theme.glass_rim_top,theme.dark?0.50f:0.82f),1.0f);
+            draw_fresnel_rim(dl,a,b,r,
+                             fade_color(theme.border,theme.dark?0.78f:0.85f),
+                             fade_color(theme.border,0.36f),
+                             fade_color(theme.glass_rim_top,theme.dark?0.52f:0.88f),
+                             1.0f,f*0.45f,96.f);
         }
         hover_anim.observe(id,hovered_item,now,reduced_motion);
         ImGui::PopStyleColor(3);
     }
     bool checkbox(const char* label_text, bool* value, const char* id) {
         const float f=hover_anim.factor(id,now,reduced_motion);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,6.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,7.f);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,1.f);
-        ImGui::PushStyleColor(ImGuiCol_Border,tone(fade_color(theme.border,0.92f)));
+        ImGui::PushStyleColor(ImGuiCol_Border,tone(fade_color(theme.border,0.88f)));
         ImGui::PushStyleColor(ImGuiCol_FrameBg,tone(lerp_color(theme.frame_bg,theme.frame_hovered,f)));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,tone(lerp_color(theme.frame_bg,theme.frame_hovered,f)));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive,tone(lerp_color(theme.frame_hovered,theme.frame_active,f)));
@@ -486,8 +561,8 @@ struct Workspace::Impl {
         if(enabled&&f>0.01f) {
             const ImU32 tint=danger?theme.danger:theme.accent;
             draw_gradient_rounded_rect(dl,a,b,fade_color(tint,(theme.dark?0.34f:0.20f)*f),
-                                       fade_color(tint,(theme.dark?0.20f:0.12f)*f),8.f);
-            draw_glass_rim(dl,a,b,8.f,fade_color(tint,0.58f*f),fade_color(tint,0.22f*f),0.95f);
+                                       fade_color(tint,(theme.dark?0.20f:0.12f)*f),10.f);
+            draw_glass_rim(dl,a,b,10.f,fade_color(tint,0.58f*f),fade_color(tint,0.22f*f),0.95f);
         }
         const ImU32 text_col=!enabled?theme.text_disabled
                                      :(danger?(f>0.2f?theme.danger:lerp_color(theme.danger,theme.ink,0.18f)):theme.ink);
@@ -505,12 +580,12 @@ struct Workspace::Impl {
         }
         return false;
     }
-    // Frosted glass search field with a crisp hand-drawn magnifier and focus glow.
+    // Frosted capsule search field with a crisp hand-drawn magnifier and focus glow.
     bool search_field(const char* hint,char* buffer,std::size_t capacity,const char* id) {
         const float f=hover_anim.factor(id,now,reduced_motion);
         ImGui::SetNextItemWidth(-1.f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(32.f,layout.frame_padding_y));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,12.f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,layout.frame_rounding);
         ImGui::PushStyleColor(ImGuiCol_FrameBg,tone(lerp_color(theme.frame_bg,theme.frame_hovered,f)));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,tone(lerp_color(theme.frame_bg,theme.frame_hovered,f)));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive,tone(theme.frame_active));
@@ -520,12 +595,16 @@ struct Workspace::Impl {
         ImGui::PopStyleColor(3);ImGui::PopStyleVar(2);
         hover_anim.observe(id,hovered_item,now,reduced_motion);
         const ImVec2 a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();
+        const float r=(b.y-a.y)*0.5f;
         auto* dl=ImGui::GetWindowDrawList();
         if(active_item) {
-            dl->AddRect(ImVec2(a.x-1.f,a.y-1.f),ImVec2(b.x+1.f,b.y+1.f),fade_color(theme.accent,0.68f),13.f,0,1.5f);
+            dl->AddRect(ImVec2(a.x-1.f,a.y-1.f),ImVec2(b.x+1.f,b.y+1.f),fade_color(theme.accent,0.75f),r+1.f,0,1.5f);
         } else {
-            draw_glass_rim(dl,a,b,12.f,fade_color(theme.glass_rim_bottom,0.85f),
-                           fade_color(theme.glass_rim_top,theme.dark?0.48f:0.80f),1.0f);
+            draw_fresnel_rim(dl,a,b,r,
+                             fade_color(theme.border,theme.dark?0.78f:0.84f),
+                             fade_color(theme.border,0.36f),
+                             fade_color(theme.glass_rim_top,theme.dark?0.52f:0.88f),
+                             1.0f,f*0.45f,96.f);
         }
         const ImVec2 center(a.x+16.f,(a.y+b.y)*0.5f);
         const ImU32 tint=lerp_color(theme.muted,theme.accent,active_item?1.f:f*0.75f);
@@ -533,11 +612,11 @@ struct Workspace::Impl {
         dl->AddLine(ImVec2(center.x+3.1f,center.y+3.1f),ImVec2(center.x+6.8f,center.y+6.8f),tint,1.35f);
         return changed;
     }
-    // Liquid Glass segmented control: recessed capsule track and an elastic
-    // sliding glass droplet pill that stretches while gliding between items.
+    // Apple Liquid Glass segmented control: recessed stadium track and an
+    // asymmetric leading/trailing liquid droplet lens that stretches across items.
     float segmented_width(const char* const* labels,int count) const {
         float total=layout.segment_padding*2.f;
-        for(int i=0;i<count;++i)total+=std::max(60.f,ImGui::CalcTextSize(labels[i]).x+30.f);
+        for(int i=0;i<count;++i)total+=std::max(64.f,ImGui::CalcTextSize(labels[i]).x+32.f);
         return total;
     }
     int segmented(const char* id,const char* const* labels,int count,int selected,float* out_width=nullptr) {
@@ -547,7 +626,7 @@ struct Workspace::Impl {
         float total=layout.segment_padding*2.f;
         float cursor=layout.segment_padding;
         for(int i=0;i<count&&i<4;++i){
-            widths[i]=std::max(60.f,ImGui::CalcTextSize(labels[i]).x+30.f);
+            widths[i]=std::max(64.f,ImGui::CalcTextSize(labels[i]).x+32.f);
             local_xs[i]=cursor;
             cursor+=widths[i];
             total+=widths[i];
@@ -555,15 +634,15 @@ struct Workspace::Impl {
         const ImVec2 origin=ImGui::GetCursorScreenPos();
         const float height=layout.segment_height;
         const float inner_h=height-layout.segment_padding*2.f;
+        const float inner_r=inner_h*0.5f;
         auto* dl=ImGui::GetWindowDrawList();
-        draw_glass_well(dl,origin,ImVec2(origin.x+total,origin.y+height),layout.segment_rounding,theme,0.f,false);
+        draw_glass_well(dl,origin,ImVec2(origin.x+total,origin.y+height),height*0.5f,theme,0.f,false);
 
         const int clamped_sel=std::clamp(selected,0,std::max(0,count-1));
         const auto pill=pill_anim.sample(anim_key("seg",anim_key(id)),static_cast<std::uint64_t>(clamped_sel+1),
                                          local_xs[clamped_sel],layout.segment_padding,
                                          widths[clamped_sel],inner_h,now,reduced_motion);
 
-        // Pass 1: hitboxes and soft hover glow behind the sliding liquid pill.
         ImGui::PushID(id);
         int clicked=-1;
         std::array<float,4> hovers{};
@@ -579,24 +658,22 @@ struct Workspace::Impl {
             hovers[i]=f;
             if(press&&clicked<0)clicked=i;
             if(i!=clamped_sel&&f>0.01f) {
-                dl->AddRectFilled(a,b,fade_color(theme.ink,theme.dark?0.06f*f:0.045f*f),layout.segment_rounding-2.5f);
+                dl->AddRectFilled(a,b,fade_color(theme.ink,theme.dark?0.055f*f:0.048f*f),inner_r);
             }
             hover_anim.observe(key,hovered_seg,now,reduced_motion);
             ImGui::PopID();
         }
 
-        // Pass 2: sliding Liquid Glass jelly pill.
         const ImVec2 pill_a(origin.x+pill.x,origin.y+pill.y);
         const ImVec2 pill_b(pill_a.x+pill.w,pill_a.y+pill.h);
-        draw_jelly_pill(dl,pill_a,pill_b,layout.segment_rounding-2.5f,pill.stretch_x,pill.stretch_y,theme,false);
+        draw_jelly_pill(dl,pill_a,pill_b,inner_r,pill.stretch_x,pill.stretch_y,theme,false,1.f,pill.glint);
 
-        // Pass 3: crisp segment labels brightening dynamically as the pill glides across them.
         if(font) {
             for(int i=0;i<count&&i<4;++i) {
                 const ImVec2 a(origin.x+local_xs[i],origin.y+layout.segment_padding);
                 const ImVec2 b(a.x+widths[i],a.y+inner_h);
                 const float overlap=std::max(0.f,std::min(b.x,pill_b.x)-std::max(a.x,pill_a.x))/std::max(1.f,widths[i]);
-                const float emphasis=std::clamp(std::max(overlap,hovers[i]*0.35f),0.f,1.f);
+                const float emphasis=std::clamp(std::max(overlap,hovers[i]*0.38f),0.f,1.f);
                 const ImVec2 ts=font->CalcTextSizeA(fs,1000.f,0.f,labels[i]);
                 dl->AddText(font,fs,ImVec2(a.x+(b.x-a.x-ts.x)*0.5f,a.y+(b.y-a.y-ts.y)*0.5f),
                             lerp_color(theme.muted,theme.ink,emphasis),labels[i]);
@@ -613,7 +690,7 @@ struct Workspace::Impl {
         const auto ts=toggle_anim.state(id,*value,now,reduced_motion);
         const float f_color=std::clamp(ts.pos,0.f,1.f);
         const float f_pos=std::clamp(ts.pos,-0.08f,1.08f);
-        constexpr float width=42.f,height=24.f,knob_r=9.5f;
+        constexpr float width=44.f,height=24.f,knob_r=9.5f;
         const ImVec2 pos=ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton(id,ImVec2(width,height));
         const bool pressed=ImGui::IsItemClicked();
@@ -621,29 +698,28 @@ struct Workspace::Impl {
         const bool hovered_t=ImGui::IsItemHovered();
         auto* dl=ImGui::GetWindowDrawList();
         const ImVec2 track_b(pos.x+width,pos.y+height);
-        const ImU32 track_top=lerp_color(theme.glass_bg_subtle,lerp_color(theme.accent,theme.accent_hover,0.22f),f_color);
-        const ImU32 track_bot=lerp_color(theme.frame_bg,theme.accent,f_color);
+        const ImU32 track_top=lerp_color(theme.glass_bg_subtle,lerp_color(theme.accent,theme.accent_hover,0.28f),f_color);
+        const ImU32 track_bot=lerp_color(theme.frame_bg,fade_color(theme.accent,0.92f),f_color);
         draw_gradient_rounded_rect(dl,pos,track_b,
             hovered_t?lerp_color(track_top,theme.accent_hover,0.16f):track_top,
             hovered_t?lerp_color(track_bot,theme.accent_hover,0.12f):track_bot,height*0.5f);
-        draw_glass_sheen(dl,pos,track_b,height*0.5f,fade_color(IM_COL32(255,255,255,255),0.16f+0.12f*f_color),10.f,0.45f);
-        draw_glass_rim(dl,pos,track_b,height*0.5f,
-            fade_color(theme.glass_rim_top,0.55f+0.25f*f_color),
-            fade_color(theme.glass_rim_bottom,0.80f),1.f);
+        draw_fresnel_rim(dl,pos,track_b,height*0.5f,
+            fade_color(theme.glass_rim_top,0.62f+0.25f*f_color),
+            fade_color(theme.border,0.42f),
+            fade_color(theme.glass_rim_bottom,0.84f),1.f);
 
         const float travel=width-5.f-knob_r*2.f;
         const float cx=pos.x+2.5f+knob_r+travel*f_pos;
         const float cy=pos.y+height*0.5f;
-        const float stretch_px=knob_r*ts.stretch*1.25f;
-        const float squash_px=knob_r*ts.stretch*0.26f;
+        const float stretch_px=knob_r*ts.stretch*1.28f;
+        const float squash_px=knob_r*ts.stretch*0.24f;
         const ImVec2 ka(cx-knob_r-stretch_px,cy-knob_r+squash_px);
         const ImVec2 kb(cx+knob_r+stretch_px,cy+knob_r-squash_px);
         const float kr=std::max(2.f,(kb.y-ka.y)*0.5f);
-        dl->AddRectFilled(ImVec2(ka.x,ka.y+1.5f),ImVec2(kb.x,kb.y+2.2f),fade_color(theme.shadow,0.48f),kr);
-        draw_gradient_rounded_rect(dl,ka,kb,IM_COL32(255,255,255,255),IM_COL32(236,243,254,255),kr);
-        draw_glass_rim(dl,ka,kb,kr,IM_COL32(255,255,255,255),fade_color(theme.shadow,0.22f),0.9f);
-        // Tiny luminous specular glint on the crystal knob.
-        dl->AddCircleFilled(ImVec2(cx-knob_r*0.26f,cy-knob_r*0.30f),2.0f,fade_color(IM_COL32(255,255,255,255),0.90f),10);
+        dl->AddRectFilled(ImVec2(ka.x,ka.y+1.5f),ImVec2(kb.x,kb.y+2.5f),fade_color(theme.shadow,0.42f),kr);
+        draw_gradient_rounded_rect(dl,ka,kb,IM_COL32(255,255,255,255),IM_COL32(238,245,255,252),kr);
+        draw_glass_rim(dl,ka,kb,kr,IM_COL32(255,255,255,255),fade_color(theme.shadow,0.20f),0.9f);
+        dl->AddCircleFilled(ImVec2(cx-knob_r*0.26f,cy-knob_r*0.30f),2.0f,fade_color(IM_COL32(255,255,255,255),0.92f),10);
         ImGui::SameLine(0,10.f);ImGui::AlignTextToFramePadding();ImGui::TextUnformatted(label_text);
         return pressed;
     }
@@ -655,22 +731,20 @@ struct Workspace::Impl {
         return text.substr(0,n);
     }
     void draw_avatar(ImVec2 pos,float size,const std::string& name,std::uint64_t id) const {
-        static const ImU32 colors[]={IM_COL32(24,142,255,255),IM_COL32(102,96,242,255),IM_COL32(42,184,212,255),IM_COL32(255,152,18,255),IM_COL32(194,96,246,255)};
+        static const ImU32 colors[]={IM_COL32(18,136,255,255),IM_COL32(118,92,250,255),IM_COL32(22,192,222,255),IM_COL32(255,148,32,255),IM_COL32(214,88,238,255)};
         auto* dl=ImGui::GetWindowDrawList();
         const ImU32 color=colors[id%5];
         const ImVec2 b(pos.x+size,pos.y+size);
-        const float r=size*0.30f;
-        dl->AddRectFilled(ImVec2(pos.x,pos.y+1.5f),ImVec2(b.x,b.y+2.5f),fade_color(color,0.26f),r);
-        draw_gradient_rounded_rect(dl,pos,b,lerp_color(color,IM_COL32(255,255,255,255),0.18f),
-                                   lerp_color(color,IM_COL32(0,0,0,255),0.18f),r,0,true);
-        draw_glass_sheen(dl,pos,b,r,fade_color(IM_COL32(255,255,255,255),0.34f),size*0.52f,0.52f);
-        draw_glass_rim(dl,pos,b,r,fade_color(IM_COL32(255,255,255,255),0.50f),
-                       fade_color(IM_COL32(255,255,255,255),0.12f),0.9f);
+        const float r=size*0.32f;
+        dl->AddRectFilled(ImVec2(pos.x,pos.y+1.5f),ImVec2(b.x,b.y+2.8f),fade_color(color,0.28f),r+1.f);
+        draw_gradient_rounded_rect(dl,pos,b,lerp_color(color,IM_COL32(255,255,255,255),0.24f),
+                                   fade_color(lerp_color(color,IM_COL32(8,16,36,255),0.16f),0.90f),r,0,true);
+        draw_fresnel_rim(dl,pos,b,r,IM_COL32(255,255,255,190),IM_COL32(255,255,255,52),IM_COL32(255,255,255,110),0.95f);
         ImFont* font=ImGui::GetFont();if(!font)return;
         const std::string glyph=first_glyph(name);
         const float fs=size*0.42f;
         const ImVec2 ts=font->CalcTextSizeA(fs,1000.f,0.f,glyph.c_str());
-        dl->AddText(font,fs,ImVec2(pos.x+(size-ts.x)*0.5f,pos.y+(size-ts.y)*0.5f),IM_COL32(255,255,255,248),glyph.c_str());
+        dl->AddText(font,fs,ImVec2(pos.x+(size-ts.x)*0.5f,pos.y+(size-ts.y)*0.5f),IM_COL32(255,255,255,250),glyph.c_str());
     }
     void draw_brand_icon(ImVec2 pos,float size) const {
         draw_brand_icon_glass(ImGui::GetWindowDrawList(),pos,size,theme);
@@ -680,15 +754,16 @@ struct Workspace::Impl {
         const float w=width<0.f?std::max(20.f,avail+width+1.f):(width==0.f?avail:width);
         const ImVec2 a=ImGui::GetCursorScreenPos();
         const ImVec2 b(a.x+w,a.y+height);
-        const float r=std::min(height*0.5f,8.f);
+        const float r=height*0.5f;
         auto* dl=ImGui::GetWindowDrawList();
         draw_glass_well(dl,a,b,r,theme,0.f,false);
         const float clamped=std::clamp(ratio,0.f,1.f);
         if(clamped>0.005f) {
             const float fw=std::max(r*2.f,w*clamped);
             const ImVec2 fb(std::min(b.x,a.x+fw),b.y);
-            draw_gradient_rounded_rect(dl,a,fb,theme.accent_hover,theme.accent,r);
-            draw_glass_sheen(dl,a,fb,r,fade_color(IM_COL32(255,255,255,255),0.36f),height*0.55f,0.52f);
+            draw_gradient_rounded_rect(dl,a,fb,lerp_color(theme.accent_hover,theme.info,0.38f),theme.accent,r,0,true);
+            dl->AddLine(ImVec2(a.x+r,a.y+1.0f),ImVec2(std::max(a.x+r,fb.x-r),a.y+1.0f),
+                        fade_color(IM_COL32(255,255,255,255),0.65f),1.0f);
         }
         if(overlay&&*overlay&&ImGui::GetFont()) {
             const ImVec2 ts=ImGui::CalcTextSize(overlay);
@@ -698,7 +773,28 @@ struct Workspace::Impl {
         ImGui::Dummy(ImVec2(w,height));
     }
 
-    // ---- Modal transition --------------------------------------------------
+    // ---- Modal sheet chrome & transition -----------------------------------
+    bool modal_sheet_header(const char* title, bool allow_close=true) {
+        bool closed=false;
+        const float avail=ImGui::GetContentRegionAvail().x;
+        const float btn_sz=26.f;
+        const ImVec2 start=ImGui::GetCursorScreenPos();
+        ImFont* font=ImGui::GetFont();
+        const float fs=ImGui::GetFontSize()*1.08f;
+        if(font) {
+            ImGui::GetWindowDrawList()->AddText(font,fs,ImVec2(start.x,start.y+(btn_sz-fs)*0.5f),theme.ink,title);
+        }
+        ImGui::Dummy(ImVec2(std::max(1.f,avail-(allow_close?btn_sz+8.f:0.f)),btn_sz));
+        if(allow_close) {
+            ImGui::SameLine(0,8.f);
+            closed=icon_button(NavIcon::Close,"关闭",title,btn_sz);
+        }
+        const ImVec2 sep=ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(sep.x,sep.y+1.f),ImVec2(sep.x+avail,sep.y+1.f),
+                                            fade_color(theme.separator,0.65f),1.f);
+        ImGui::Dummy(ImVec2(0,5.f));
+        return closed;
+    }
     void begin_modal() {
         modal.start(0,1,now,std::chrono::duration<double>(motion.modal),Easing::LiquidSpring,reduced_motion);
     }
@@ -712,11 +808,6 @@ struct Workspace::Impl {
         ImGui::SetNextWindowSize(ImVec2(width,0),ImGuiCond_Always);
         ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(layout.modal_min_width,max_width),0),ImVec2(max_width,max_height));
     }
-    // Height available to a modal body after reserving chrome and the footer.
-    // The body always scrolls vertically, so long forms and 32 interactive
-    // prompts can never enlarge the popup past the main window.
-    // Final safety net: even during the slide-in offset or on a tiny viewport,
-    // the popup rectangle is nudged back inside the main window.
     void clamp_modal_to_viewport() {
         const ImGuiViewport* viewport=ImGui::GetMainViewport();
         const ImVec2 pos=ImGui::GetWindowPos();
@@ -732,7 +823,6 @@ struct Workspace::Impl {
     float modal_body_height(float desired) const {
         const ImVec2 available=ImGui::GetMainViewport()->WorkSize;
         const float usable=available.y-layout.modal_viewport_margin*2.f;
-        // On tiny viewports the usual minimum must yield to title and footer.
         const float max_body=std::max(1.f,
                                       usable*layout.modal_body_max_ratio-layout.modal_chrome_height);
         return std::min(desired,max_body);
@@ -741,8 +831,6 @@ struct Workspace::Impl {
         ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
         ImGui::BeginChild("##弹窗正文",ImVec2(0,height),false);
     }
-    // Confirmation text determines the height. Only oversized content scrolls;
-    // the action row remains outside the scrollable body.
     float confirmation_width(float content,float limit) const {
         const float room=ImGui::GetMainViewport()->WorkSize.x-layout.confirm_viewport_margin*2.f;
         return std::max(1.f,std::min(room,std::clamp(content+layout.confirm_padding*2.f,layout.confirm_min_width,limit)));
@@ -756,7 +844,7 @@ struct Workspace::Impl {
     }
     void begin_confirmation_body() {
         const float usable=ImGui::GetMainViewport()->WorkSize.y-layout.confirm_viewport_margin*2.f;
-        const float chrome=ImGui::GetFrameHeight()+layout.confirm_padding*2.f+layout.button_height_large+ImGui::GetStyle().ItemSpacing.y*3.f+2.f;
+        const float chrome=38.f+layout.confirm_padding*2.f+layout.button_height_large+ImGui::GetStyle().ItemSpacing.y*3.f+4.f;
         ImGui::SetNextWindowSizeConstraints(ImVec2(0,0),ImVec2(FLT_MAX,std::max(1.f,usable-chrome)));
         ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
         ImGui::BeginChild("##确认正文",ImVec2(ImGui::GetContentRegionAvail().x,0),ImGuiChildFlags_AutoResizeY|ImGuiChildFlags_AlwaysAutoResize);
@@ -953,18 +1041,21 @@ struct Workspace::Impl {
         const int key_ready=poll_key_task();
         const float mp=modal_progress();
         const float a=std::clamp(mp,0.f,1.f);
+        constexpr ImGuiWindowFlags kSheetFlags=ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar;
         // Modals read WindowRounding / WindowBorderSize (not PopupRounding).
         // Match our glass modal chrome radius exactly so no square corners leak.
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,layout.popup_rounding);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,0.f);
         ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize,0.f);
         ImGui::PushStyleVar(ImGuiStyleVar_Alpha,a);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(20.f,18.f));
         constrain_modal(layout.modal_width_device);
         apply_modal_offset(mp);
-        if(ImGui::BeginPopupModal("设备资料",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("设备资料",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(10.f,6.f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(10.f,6.f));
+            if(modal_sheet_header("设备资料")) {discard_key_task();ImGui::CloseCurrentPopup();}
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(12.f,7.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(10.f,7.f));
             begin_modal_body(modal_body_height(380));
             ImGui::BeginDisabled(static_cast<bool>(key_task)||key_ready!=0);
             field_row("连接方式");
@@ -974,7 +1065,7 @@ struct Workspace::Impl {
             ImGui::EndDisabled();
             end_modal_body();
             ImGui::PopStyleVar(2);
-            const float footer=footer_pair_width(130);
+            const float footer=footer_pair_width(136);
             const bool save_clicked=button("保存设备",ImVec2(footer,layout.button_height),"保存设备",ButtonKind::Primary);
             if((save_clicked||key_ready==1)&&valid()&&cb.save_host&&!key_task) {
                 if(connection_type==0&&auth==1&&key_ready!=1) start_key_task(false,1);
@@ -985,10 +1076,11 @@ struct Workspace::Impl {
         }
         constrain_modal(layout.modal_width_device);
         apply_modal_offset(mp);
-        if(ImGui::BeginPopupModal("连接到服务器",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("连接到服务器",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(10.f,6.f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(10.f,6.f));
+            if(modal_sheet_header("连接到服务器")) {discard_key_task();clear_connection_secret();ImGui::CloseCurrentPopup();}
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(12.f,7.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(10.f,7.f));
             begin_modal_body(modal_body_height(500));
             ImGui::BeginDisabled(static_cast<bool>(key_task)||key_ready!=0);
             ImGui::SetNextItemWidth(std::min(180.f,ImGui::GetContentRegionAvail().x));
@@ -997,7 +1089,7 @@ struct Workspace::Impl {
             ImGui::EndDisabled();
             end_modal_body();
             ImGui::PopStyleVar(2);
-            const float footer=footer_pair_width(150);
+            const float footer=footer_pair_width(154);
             const bool connect_clicked=button(connection_type==0?"发起安全连接":"连接串口",ImVec2(footer,layout.button_height),"发起安全连接",ButtonKind::Primary);
             if(connect_clicked&&connection_type==1) {
                 if(!valid()) {}
@@ -1028,12 +1120,14 @@ struct Workspace::Impl {
             ImGui::SameLine();if(button("取消",ImVec2(footer,layout.button_height),"取消连接")) {discard_key_task();clear_connection_secret();ImGui::CloseCurrentPopup();}
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar();
         const std::string close_text="确定关闭「"+close_title+"」的会话？";
         const char* close_note="关闭后连接和正在进行的传输将被取消。";
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(layout.confirm_padding,layout.confirm_padding));
         constrain_confirmation(std::max(ImGui::CalcTextSize(close_text.c_str()).x,ImGui::CalcTextSize(close_note).x),layout.modal_width_confirm,mp);
-        if(ImGui::BeginPopupModal("关闭会话？",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("关闭会话？",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
+            if(modal_sheet_header("关闭会话？")) {close_session=0;ImGui::CloseCurrentPopup();}
             begin_confirmation_body();
             ImGui::TextWrapped("%s",close_text.c_str());
             confirmation_note(close_note,theme.muted);
@@ -1050,8 +1144,9 @@ struct Workspace::Impl {
         const std::string delete_text="从设备库删除「"+draft.name+"」？";
         const char* delete_note="此操作不可撤销；不会自动关闭已有会话。";
         constrain_confirmation(std::max(ImGui::CalcTextSize(delete_text.c_str()).x,ImGui::CalcTextSize(delete_note).x),layout.modal_width_confirm,mp);
-        if(ImGui::BeginPopupModal("删除设备？",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("删除设备？",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
+            if(modal_sheet_header("删除设备？")) ImGui::CloseCurrentPopup();
             begin_confirmation_body();
             ImGui::TextWrapped("%s",delete_text.c_str());
             ImGui::PushStyleColor(ImGuiCol_Text,tone(theme.muted));
@@ -1064,11 +1159,13 @@ struct Workspace::Impl {
             ImGui::EndPopup();
         }
         ImGui::PopStyleVar();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(20.f,18.f));
         constrain_modal(layout.modal_width_settings);
         apply_modal_offset(mp);
-        if(ImGui::BeginPopupModal("偏好设置",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("偏好设置",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
-            begin_modal_body(modal_body_height(300));
+            if(modal_sheet_header("偏好设置")) ImGui::CloseCurrentPopup();
+            begin_modal_body(modal_body_height(290));
             auto s=m.settings;
             bool changed=false;
             label("交互");
@@ -1086,15 +1183,17 @@ struct Workspace::Impl {
                     (s.theme==app::ThemeMode::System ? (theme.dark?"（系统 · 深色）":"（系统 · 浅色）"):"");
                 label(effective);
             }
-            label("界面采用轻量化液态玻璃质感、折射高光描边与果冻弹性滑动动画。");
+            label("采用 Apple Liquid Glass 高通透光学折射质感、双角菲涅尔高光与液态果冻动画。");
             end_modal_body();
-            if(button("完成",ImVec2(100,layout.button_height_small),"完成设置",ButtonKind::Primary))ImGui::CloseCurrentPopup();
+            if(button("完成",ImVec2(108,layout.button_height),"完成设置",ButtonKind::Primary))ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar();
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(layout.confirm_padding,layout.confirm_padding));
         constrain_confirmation(paste_error.empty()?420.f:ImGui::CalcTextSize(paste_error.c_str()).x,layout.modal_width_paste,mp);
-        if(ImGui::BeginPopupModal("确认粘贴到远端",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("确认粘贴到远端",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
+            if(modal_sheet_header("确认粘贴到远端")) {clear_paste();restore_terminal_focus=true;ImGui::CloseCurrentPopup();}
             auto target=paste_terminal.lock();
             const app::SessionView* target_session=nullptr;
             for(const auto& s:m.sessions)if(s.id==paste_session&&s.connected&&s.terminal==target)target_session=&s;
@@ -1111,7 +1210,7 @@ struct Workspace::Impl {
                 const float preview_cap=std::max(54.f,std::min(layout.paste_preview_height,ImGui::GetMainViewport()->WorkSize.y*0.30f));
                 const float preview_height=std::clamp(static_cast<float>(lines)*ImGui::GetTextLineHeight()+18.f+ImGui::GetStyle().ScrollbarSize,48.f,preview_cap);
                 const ImVec2 pp=ImGui::GetCursorScreenPos();
-                draw_glass_well(ImGui::GetWindowDrawList(),pp,ImVec2(pp.x+preview_width,pp.y+preview_height),layout.frame_rounding,theme);
+                draw_glass_well(ImGui::GetWindowDrawList(),pp,ImVec2(pp.x+preview_width,pp.y+preview_height),14.f,theme);
                 ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
                 ImGui::BeginChild("粘贴预览",ImVec2(preview_width,preview_height),ImGuiChildFlags_AlwaysUseWindowPadding,ImGuiWindowFlags_HorizontalScrollbar);
                 ImGui::TextUnformatted(paste_text.data(),paste_text.data()+paste_text.size());
@@ -1138,8 +1237,9 @@ struct Workspace::Impl {
             ImGui::EndPopup();
         }
         constrain_confirmation(m.trust?std::max(360.f,ImGui::CalcTextSize(m.trust->fingerprint.c_str()).x):200.f,layout.modal_width_trust,mp);
-        if(ImGui::BeginPopupModal("验证服务器身份",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("验证服务器身份",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
+            modal_sheet_header("验证服务器身份",false);
             begin_confirmation_body();
             if(m.trust) {
                 const auto& t=*m.trust;
@@ -1197,8 +1297,9 @@ struct Workspace::Impl {
         const char* delete_file_note="永久删除选中的文件或链接，不能撤销。";
         const std::string path_text=std::string(operation.remote?"远端：":"本地：")+operation.path;
         constrain_confirmation(std::max(ImGui::CalcTextSize(path_text.c_str()).x,deleting?ImGui::CalcTextSize(delete_file_note).x:285.f),layout.modal_width_operation,mp);
-        if(ImGui::BeginPopupModal("确认文件操作",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove)) {
+        if(ImGui::BeginPopupModal("确认文件操作",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)) {
             clamp_modal_to_viewport();
+            if(modal_sheet_header("确认文件操作")) ImGui::CloseCurrentPopup();
             begin_confirmation_body();
             static const char* action_labels[]={"新建目录","重命名","删除文件","修改权限"};
             ImGui::TextColored(tone(deleting?theme.danger:theme.accent),"%s",action_labels[static_cast<int>(operation.operation)]);
@@ -1336,15 +1437,15 @@ struct Workspace::Impl {
         const ImVec2 origin=ImGui::GetCursorScreenPos();
         const ImVec2 end(origin.x+avail_w,origin.y+bar_h);
         auto* dl=ImGui::GetWindowDrawList();
-        draw_glass_well(dl,origin,end,9.f,theme,0.f,false);
+        draw_glass_well(dl,origin,end,bar_h*0.5f,theme,0.f,false);
 
         const float icon_sz=14.f;
-        draw_folder_icon(dl,ImVec2(origin.x+8.f,origin.y+(bar_h-icon_sz)*0.5f),icon_sz,theme,false);
+        draw_folder_icon(dl,ImVec2(origin.x+10.f,origin.y+(bar_h-icon_sz)*0.5f),icon_sz,theme,false);
         const auto crumbs=split_path_crumbs(raw_path,remote);
         ImFont* font=ImGui::GetFont();
         const float fs=ImGui::GetFontSize();
-        const float left_pad=8.f+icon_sz+7.f;
-        const float right_pad=8.f;
+        const float left_pad=10.f+icon_sz+7.f;
+        const float right_pad=10.f;
         const float inner_w=std::max(20.f,avail_w-left_pad-right_pad);
         const float sep_w=font?font->CalcTextSizeA(fs,1000.f,0.f," › ").x:12.f;
         const float ellip_w=font?font->CalcTextSizeA(fs,1000.f,0.f,"…").x+6.f:16.f;
@@ -1357,10 +1458,9 @@ struct Workspace::Impl {
         std::vector<float> widths(crumbs.size(),0.f);
         float total_w=0.f;
         for(std::size_t i=0;i<crumbs.size();++i) {
-            widths[i]=font->CalcTextSizeA(fs,1000.f,0.f,crumbs[i].label.c_str()).x+10.f;
+            widths[i]=font->CalcTextSizeA(fs,1000.f,0.f,crumbs[i].label.c_str()).x+12.f;
             total_w+=widths[i]+(i>0?sep_w:0.f);
         }
-        // Keep root + trailing segments when deep paths exceed bar width.
         std::size_t first_tail=0;
         bool collapsed=false;
         if(total_w>inner_w&&crumbs.size()>2) {
@@ -1379,26 +1479,29 @@ struct Workspace::Impl {
         float x=origin.x+left_pad;
         const float text_y=origin.y+(bar_h-fs)*0.5f;
         auto emit_sep=[&]{
-            dl->AddText(font,fs,ImVec2(x,text_y),fade_color(theme.muted,0.65f)," › ");
+            dl->AddText(font,fs,ImVec2(x,text_y),fade_color(theme.muted,0.58f)," › ");
             x+=sep_w;
         };
         auto emit_crumb=[&](std::size_t idx,bool last,float max_chip_w){
             const auto& c=crumbs[idx];
-            const std::string shown=elide(font,fs,c.label,std::max(14.f,max_chip_w-10.f));
-            const float chip_w=std::min(max_chip_w,font->CalcTextSizeA(fs,1000.f,0.f,shown.c_str()).x+10.f);
+            const std::string shown=elide(font,fs,c.label,std::max(14.f,max_chip_w-12.f));
+            const float chip_w=std::min(max_chip_w,font->CalcTextSizeA(fs,1000.f,0.f,shown.c_str()).x+12.f);
             const ImVec2 ca(x,origin.y+3.f),cb(x+chip_w,end.y-3.f);
+            const float cr=(cb.y-ca.y)*0.5f;
             ImGui::PushID(static_cast<int>(idx));
             ImGui::SetCursorScreenPos(ca);
             const bool clicked=ImGui::InvisibleButton("##段",ImVec2(std::max(1.f,chip_w),std::max(1.f,cb.y-ca.y)));
             const bool hovered_c=ImGui::IsItemHovered();
-            if(hovered_c&&can_nav&&!last) {
-                dl->AddRectFilled(ca,cb,fade_color(theme.accent,theme.dark?0.22f:0.14f),6.f);
-                draw_glass_rim(dl,ca,cb,6.f,fade_color(theme.accent,0.45f),fade_color(theme.accent,0.18f),0.9f);
+            if(last) {
+                dl->AddRectFilled(ca,cb,fade_color(theme.ink,theme.dark?0.09f:0.06f),cr);
+            } else if(hovered_c&&can_nav) {
+                dl->AddRectFilled(ca,cb,fade_color(theme.accent,theme.dark?0.24f:0.14f),cr);
+                draw_glass_rim(dl,ca,cb,cr,fade_color(theme.accent_hover,0.52f),fade_color(theme.accent,0.20f),0.9f);
             }
             if(hovered_c) ImGui::SetTooltip("%s",c.full_path.c_str());
             if(clicked&&can_nav&&!last) navigation=c.full_path;
-            const ImU32 col=last?theme.ink:(hovered_c&&can_nav?theme.accent_hover:theme.muted);
-            dl->AddText(font,fs,ImVec2(ca.x+5.f,text_y),col,shown.c_str());
+            const ImU32 col=last?theme.ink:(hovered_c&&can_nav?(theme.dark?theme.accent_hover:theme.accent):theme.muted);
+            dl->AddText(font,fs,ImVec2(ca.x+6.f,text_y),col,shown.c_str());
             ImGui::PopID();
             x+=chip_w;
         };
@@ -1438,6 +1541,7 @@ struct Workspace::Impl {
             if(b.listed_path!=pane->path){b.selection.clear();b.anchor.clear();b.reset_scroll=true;}
             b.listed_path=pane->path;copy(b.path,pane->path);
         }
+        if(pane)file_rows(b,*pane);
         std::optional<std::string> navigation;
         const std::string up=pane?app::file_parent(pane->path,remote):"";
         auto eligible=[&](const app::FileEntry& e){return e.regular&&app::valid_file_leaf(e.name,app::windows_file_path(!remote));};
@@ -1447,62 +1551,110 @@ struct Workspace::Impl {
         ImGui::PushID(remote?1:0);
         const ImVec2 pane_origin=ImGui::GetCursorScreenPos();
         draw_glass_panel(ImGui::GetWindowDrawList(),pane_origin,ImVec2(pane_origin.x+width,pane_origin.y+height),
-                         layout.child_rounding-2.f,theme,page_alpha,false,remote?0.055f:0.030f);
+                         layout.child_rounding-2.f,theme,page_alpha,false,remote?0.055f:0.030f,true);
         ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
         ImGui::BeginChild("文件栏",ImVec2(width,height),ImGuiChildFlags_AlwaysUseWindowPadding);
-        // Header: crisp folder/SFTP vector badge + quick directory navigation.
+
+        // Row 1: Finder-style header badge + inline item summary + circular glass nav icons.
         {
+            constexpr float nav_sz=26.f;
+            const float nav_group_w=nav_sz*3.f+10.f;
+            const float row_right=ImGui::GetWindowContentRegionMax().x;
+            const float row_y=ImGui::GetCursorPosY();
             const ImVec2 badge_pos=ImGui::GetCursorScreenPos();
-            draw_pane_badge_icon(ImGui::GetWindowDrawList(),ImVec2(badge_pos.x,badge_pos.y+1.f),17.f,remote,theme);
-            ImGui::Dummy(ImVec2(20.f,18.f));ImGui::SameLine(0,4.f);
-            ImGui::TextColored(tone(theme.accent),"%s",remote?"远端 · SFTP":"本地文件");
+            draw_pane_badge_icon(ImGui::GetWindowDrawList(),ImVec2(badge_pos.x,badge_pos.y+4.f),18.f,remote,theme);
+            ImGui::Dummy(ImVec2(22.f,nav_sz));ImGui::SameLine(0,4.f);
+            const float text_dy=(nav_sz-ImGui::GetFontSize())*0.5f;
+            ImGui::SetCursorPosY(row_y+text_dy);
+            ImGui::TextColored(tone(theme.dark?theme.accent_hover:theme.accent),"%s",remote?"远端 · SFTP":"本地文件");
+            const float after_title_x=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
+            if(row_right-after_title_x>nav_group_w+90.f) {
+                ImGui::SameLine(0,8.f);
+                ImGui::SetCursorPosY(row_y+text_dy);
+                char summary[96];
+                if(!allowed) std::snprintf(summary,sizeof(summary),"未连接");
+                else if(busy) {
+                    const char* steps[]={"读取中 .","读取中 ..","读取中 ..."};
+                    const int step=loading.step(now,reduced_motion);
+                    std::snprintf(summary,sizeof(summary),"%s",step<0?"读取中":steps[step]);
+                    loading_visible=!reduced_motion;
+                } else {
+                    std::snprintf(summary,sizeof(summary),"%zu 项 · 已选 %zu%s",
+                                  b.rows.size(),b.selection.size(),pane&&pane->truncated?" · 已截断":"");
+                }
+                const float max_sum_w=std::max(20.f,row_right-nav_group_w-ImGui::GetCursorPosX()-10.f);
+                ImGui::TextColored(tone(theme.muted),"%s",elide(ImGui::GetFont(),ImGui::GetFontSize(),summary,max_sum_w).c_str());
+            } else if(busy) {
+                loading.step(now,reduced_motion);
+                loading_visible=!reduced_motion;
+            }
+            const float cur_x=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
+            ImGui::SameLine(std::max(cur_x+6.f,row_right-nav_group_w));
+            ImGui::SetCursorPosY(row_y);
+            ImGui::BeginDisabled(!allowed||busy||!cb.file_list);
+            if(icon_button(NavIcon::Home,"前往主目录",remote?"远端主目录":"本地主目录",nav_sz))navigation=".";
+            ImGui::SameLine(0,5.f);ImGui::SetCursorPosY(row_y);
+            ImGui::BeginDisabled(!ready||up==pane->path);
+            if(icon_button(NavIcon::Up,"返回上一级",remote?"远端上一级":"本地上一级",nav_sz))navigation=up;
+            ImGui::EndDisabled();
+            ImGui::SameLine(0,5.f);ImGui::SetCursorPosY(row_y);
+            if(icon_button(NavIcon::Refresh,"刷新当前目录",remote?"远端刷新":"本地刷新",nav_sz))
+                navigation=pane&&!pane->path.empty()?pane->path:std::string(b.path.data());
+            ImGui::EndDisabled();
         }
-        ImGui::SameLine();
+
+        // Row 2: Sleek stadium-capsule path bar + Go pill.
         ImGui::BeginDisabled(!allowed||busy||!cb.file_list);
-        if(small_button("主目录",remote?"远端主目录":"本地主目录"))navigation=".";
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!ready||up==pane->path);
-        if(small_button("上一级",remote?"远端上一级":"本地上一级"))navigation=up;
-        ImGui::EndDisabled();ImGui::SameLine();
-        if(small_button("刷新",remote?"远端刷新":"本地刷新"))navigation=pane&&!pane->path.empty()?pane->path:std::string(b.path.data());
-        ImGui::SetNextItemWidth(std::max(30.f,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize("前往").x-32.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(12.f,5.f));
+        const float go_w=ImGui::CalcTextSize("前往").x+24.f;
+        ImGui::SetNextItemWidth(std::max(36.f,ImGui::GetContentRegionAvail().x-go_w-6.f));
         begin_frame_widget(remote?"远端路径":"本地路径");
         if(ImGui::InputTextWithHint("##路径","输入目录路径",b.path.data(),b.path.size(),ImGuiInputTextFlags_EnterReturnsTrue))navigation=b.path.data();
         end_frame_widget(remote?"远端路径":"本地路径");
-        ImGui::SameLine();if(button("前往",ImVec2(0,ImGui::GetFrameHeight()),remote?"远端前往":"本地前往"))navigation=b.path.data();
+        ImGui::SameLine(0,6.f);
+        if(button("前往",ImVec2(go_w,ImGui::GetFrameHeight()),remote?"远端前往":"本地前往"))navigation=b.path.data();
+        ImGui::PopStyleVar();
         ImGui::EndDisabled();
-        ImGui::SetNextItemWidth(std::max(30.f,ImGui::GetContentRegionAvail().x-ImGui::CalcTextSize("隐藏项").x-48.f));
-        begin_frame_widget(remote?"远端筛选":"本地筛选");
-        if(ImGui::InputTextWithHint("##筛选","筛选当前目录",b.filter.data(),b.filter.size())){b.rebuild=true;b.reset_scroll=true;}
-        end_frame_widget(remote?"远端筛选":"本地筛选");
-        ImGui::SameLine();if(checkbox("隐藏项",&b.show_hidden,remote?"远端隐藏":"本地隐藏")){b.rebuild=true;b.reset_scroll=true;}
-        if(pane)file_rows(b,*pane);
+
+        // Row 3: Finder action capsules + inline filter capsule + hidden-files pill chip.
         int selected_files=0;
         if(pane&&!b.selection.empty())for(int i:b.rows){const auto& e=pane->entries[i];if(b.selection.count(e.name)&&eligible(e))++selected_files;}
         const std::string send=std::string(remote?"下载":"上传")+(selected_files?" ("+std::to_string(selected_files)+")":"");
+        constexpr float act_h=28.f;
         ImGui::BeginDisabled(!can_transfer||!selected_files);
-        if(button((send+"###传输").c_str(),ImVec2(0,layout.button_height_small),remote?"远端传输":"本地传输",ButtonKind::Primary)){
+        if(button((send+"###传输").c_str(),ImVec2(0,act_h),remote?"远端传输":"本地传输",ButtonKind::Primary)){
             int added=0;
             for(int i:b.rows){const auto& e=pane->entries[i];if(b.selection.count(e.name)&&eligible(e)&&transfer(e))++added;}
             b.transfer_feedback="已入队 "+std::to_string(added)+" / "+std::to_string(selected_files)+" 个文件";
             if(added<selected_files)b.transfer_feedback+="（重复任务或队列已满）";
         }
-        ImGui::EndDisabled();ImGui::SameLine();
+        ImGui::EndDisabled();ImGui::SameLine(0,6.f);
         ImGui::BeginDisabled(!ready||!cb.file_operation);
-        if(button("新建目录",ImVec2(0,layout.button_height_small),remote?"远端新建":"本地新建"))file_action(s.id,*pane,app::FileOperation::Mkdir);
-        ImGui::EndDisabled();ImGui::SameLine();
+        if(button("新建目录",ImVec2(0,act_h),remote?"远端新建":"本地新建"))file_action(s.id,*pane,app::FileOperation::Mkdir);
+        ImGui::EndDisabled();ImGui::SameLine(0,6.f);
         ImGui::BeginDisabled(!ready||b.rows.empty());
-        if(button("全选",ImVec2(0,layout.button_height_small),remote?"远端全选":"本地全选"))for(int i:b.rows)b.selection.insert(pane->entries[i].name);
+        if(button("全选",ImVec2(0,act_h),remote?"远端全选":"本地全选"))for(int i:b.rows)b.selection.insert(pane->entries[i].name);
         ImGui::EndDisabled();
+
+        const float chip_w=ImGui::CalcTextSize("隐藏项").x+28.f;
+        const float rem_after_btns=ImGui::GetContentRegionAvail().x-
+            (ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x-ImGui::GetStyle().WindowPadding.x);
+        if(rem_after_btns>=chip_w+106.f) ImGui::SameLine(0,6.f);
+        const float filter_avail=ImGui::GetContentRegionAvail().x;
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(11.f,5.f));
+        ImGui::SetNextItemWidth(std::max(36.f,filter_avail-chip_w-6.f));
+        begin_frame_widget(remote?"远端筛选":"本地筛选");
+        if(ImGui::InputTextWithHint("##筛选","筛选…",b.filter.data(),b.filter.size())){b.rebuild=true;b.reset_scroll=true;}
+        end_frame_widget(remote?"远端筛选":"本地筛选");
+        ImGui::PopStyleVar();
+        ImGui::SameLine(0,6.f);
+        if(pill_chip("隐藏项",&b.show_hidden,remote?"远端隐藏":"本地隐藏",act_h)){b.rebuild=true;b.reset_scroll=true;}
+
         if(!allowed)label("等待 SSH 连接，远端文件暂不可用");
-        else if(busy){
-            const char* steps[]={"正在读取目录 .","正在读取目录 ..","正在读取目录 ..."};
-            const int step=loading.step(now,reduced_motion);
-            label(step<0?"正在读取目录":steps[step]);loading_visible=!reduced_motion;
-        } else if(pane&&!pane->error.empty()){
+        else if(pane&&!pane->error.empty()){
             ImGui::TextColored(tone(theme.danger),"%s",elide(ImGui::GetFont(),ImGui::GetFontSize(),pane->error,ImGui::GetContentRegionAvail().x).c_str());
             if(ImGui::IsItemHovered())ImGui::SetTooltip("未进入：%s\n当前目录：%s",pane->requested_path.c_str(),pane->path.c_str());
-        } else ImGui::TextColored(tone(theme.muted),"%zu / %zu 项 · 已选 %zu%s",b.rows.size(),pane?pane->entries.size():0,b.selection.size(),pane&&pane->truncated?" · 列表已截断":"");
+        }
         if(!b.transfer_feedback.empty()){
             label(elide(ImGui::GetFont(),ImGui::GetFontSize(),b.transfer_feedback,ImGui::GetContentRegionAvail().x));
             if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",b.transfer_feedback.c_str());
@@ -1514,16 +1666,17 @@ struct Workspace::Impl {
         if(pane&&!pane->path.empty()){
             draw_path_breadcrumbs(pane->path,remote,allowed&&!busy&&cb.file_list!=nullptr,navigation);
             const bool wide=ImGui::GetContentRegionAvail().x>=355.f;
-            const auto flags=ImGuiTableFlags_ScrollY|ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH|
-                ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_Sortable|ImGuiTableFlags_Resizable;
+            // Clean borderless Apple Finder list (no spreadsheet grid lines).
+            const auto flags=ImGuiTableFlags_ScrollY|ImGuiTableFlags_SizingStretchProp|
+                ImGuiTableFlags_Sortable|ImGuiTableFlags_Resizable;
             ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,tone(theme.table_header_bg));
             ImGui::PushStyleColor(ImGuiCol_TableBorderLight,tone(theme.table_border_light));
             ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt,tone(theme.table_row_bg_alt));
-            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,ImVec2(6.f,3.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,ImVec2(7.f,2.f));
             const float table_h=std::max(64.f,ImGui::GetContentRegionAvail().y-2.f);
             if(ImGui::BeginTable(wide?"文件表格":"精简表格",wide?3:2,flags,ImVec2(0,table_h))){
                 ImGui::TableSetupColumn("名称",ImGuiTableColumnFlags_WidthStretch|ImGuiTableColumnFlags_DefaultSort,1.f,0);
-                ImGui::TableSetupColumn("大小",ImGuiTableColumnFlags_WidthFixed,72.f,1);
+                ImGui::TableSetupColumn("大小",ImGuiTableColumnFlags_WidthFixed,74.f,1);
                 if(wide)ImGui::TableSetupColumn("修改时间",ImGuiTableColumnFlags_WidthFixed,126.f,2);
                 ImGui::TableSetupScrollFreeze(0,1);ImGui::TableHeadersRow();
                 if(auto* spec=ImGui::TableGetSortSpecs();spec&&spec->SpecsDirty&&spec->SpecsCount){
@@ -1551,7 +1704,7 @@ struct Workspace::Impl {
                 const bool dragging_other=ready&&s.connected&&ImGui::GetDragDropPayload()!=nullptr&&
                                           dragged_file.session==s.id&&dragged_file.remote!=remote;
 
-                ImGuiListClipper clipper;clipper.Begin(static_cast<int>(b.rows.size()),row_h+6.f);
+                ImGuiListClipper clipper;clipper.Begin(static_cast<int>(b.rows.size()),row_h+4.f);
                 while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){
                     const auto& e=pane->entries[b.rows[row]];
                     ImGui::PushID(b.rows[row]);ImGui::TableNextRow(0,row_h);ImGui::TableNextColumn();
@@ -1579,35 +1732,33 @@ struct Workspace::Impl {
                     const ImVec2 row_a=ImGui::GetItemRectMin();
                     const ImVec2 row_b=ImGui::GetItemRectMax();
                     const bool drop_folder=dragging_other&&e.directory&&row_hovered;
-                    // Liquid Glass row pill highlight behind icon + text.
-                    const ImVec2 pill_a(row_a.x-2.f,row_a.y+smooth.rubber_offset*0.35f);
-                    const ImVec2 pill_b(row_b.x+2.f,row_b.y+smooth.rubber_offset*0.35f);
+                    // Airy Liquid Glass row pill highlight behind icon + text.
+                    const ImVec2 pill_a(row_a.x-2.f,row_a.y+1.f+smooth.rubber_offset*0.35f);
+                    const ImVec2 pill_b(row_b.x+2.f,row_b.y-1.f+smooth.rubber_offset*0.35f);
+                    constexpr float row_r=10.f;
                     if(drop_folder) {
-                        draw_gradient_rounded_rect(dl,pill_a,pill_b,fade_color(theme.accent,0.34f),fade_color(theme.accent,0.18f),8.f);
-                        draw_glass_rim(dl,pill_a,pill_b,8.f,fade_color(theme.accent_hover,0.90f),fade_color(theme.accent,0.55f),1.25f);
+                        draw_gradient_rounded_rect(dl,pill_a,pill_b,fade_color(theme.accent,0.34f),fade_color(theme.accent,0.18f),row_r);
+                        draw_glass_rim(dl,pill_a,pill_b,row_r,fade_color(theme.accent_hover,0.92f),fade_color(theme.accent,0.55f),1.25f);
                     } else if(chosen) {
-                        draw_gradient_rounded_rect(dl,pill_a,pill_b,fade_color(theme.header,1.0f),
-                            fade_color(theme.accent,theme.dark?0.18f:0.12f),8.f);
-                        draw_glass_rim(dl,pill_a,pill_b,8.f,fade_color(theme.accent_hover,0.55f),
-                            fade_color(theme.accent,0.20f),0.95f);
+                        draw_jelly_pill(dl,pill_a,pill_b,row_r,0.f,0.f,theme,true,0.92f,0.f);
                     } else if(hover_f>0.01f) {
-                        dl->AddRectFilled(pill_a,pill_b,fade_color(theme.ink,(theme.dark?0.065f:0.048f)*hover_f),8.f);
-                        draw_glass_rim(dl,pill_a,pill_b,8.f,fade_color(theme.glass_rim_top,0.38f*hover_f),
-                            fade_color(theme.glass_rim_bottom,0.22f*hover_f),0.85f);
+                        dl->AddRectFilled(pill_a,pill_b,fade_color(theme.ink,(theme.dark?0.06f:0.055f)*hover_f),row_r);
+                        draw_glass_rim(dl,pill_a,pill_b,row_r,fade_color(theme.glass_rim_top,0.42f*hover_f),
+                            fade_color(theme.glass_rim_bottom,0.24f*hover_f),0.9f,0,hover_f*0.4f,90.f);
                     }
 
-                    // Crisp vector icon instead of text prefixes ("目录  ", "链接  ", "其他  ").
+                    // Crisp procedural vector icon (folders always render folder icon, never text).
                     const float y_off=smooth.rubber_offset*0.35f;
-                    const ImVec2 icon_pos(origin.x+3.f,origin.y+y_off+(row_h-icon_sz)*0.5f);
+                    const ImVec2 icon_pos(origin.x+4.f,origin.y+y_off+(row_h-icon_sz)*0.5f);
                     if(e.symlink) draw_symlink_icon(dl,icon_pos,icon_sz,e.directory,e.name,theme);
                     else if(e.directory) draw_folder_icon(dl,icon_pos,icon_sz,theme,drop_folder);
                     else if(e.regular) draw_file_icon(dl,icon_pos,icon_sz,e.name,theme);
                     else draw_other_file_icon(dl,icon_pos,icon_sz,theme);
 
-                    const float text_x=origin.x+3.f+icon_sz+layout.file_icon_gap;
+                    const float text_x=origin.x+4.f+icon_sz+layout.file_icon_gap;
                     const float text_w=std::max(10.f,col0_avail-(text_x-origin.x)-2.f);
                     const std::string shown_name=elide(row_font,font_sz,clean_name,text_w);
-                    const ImU32 name_col=e.directory?lerp_color(theme.ink,theme.accent_hover,theme.dark?0.18f:0.10f)
+                    const ImU32 name_col=e.directory?lerp_color(theme.ink,theme.accent_hover,theme.dark?0.16f:0.08f)
                                                     :(e.symlink?theme.info:theme.ink);
                     dl->AddText(ImVec2(text_x,origin.y+y_off+(row_h-font_sz)*0.5f),name_col,shown_name.c_str());
 
@@ -1658,7 +1809,7 @@ struct Workspace::Impl {
         for(const auto& p:m.file_panes)if(p.session_id==s.id)panes[p.remote?1:0]=&p;
         const auto avail=ImGui::GetContentRegionAvail();
         const bool stacked=avail.x<590.f;
-        const float target_queue_h=browser.show_queue?std::clamp(avail.y*0.27f,82.f,165.f):0.f;
+        const float target_queue_h=browser.show_queue?std::clamp(avail.y*0.24f,84.f,148.f):0.f;
         if(std::abs(browser.queue_spring.target()-target_queue_h)>0.5)
             browser.queue_spring.retarget(target_queue_h,now,reduced_motion);
         const float queue_height=std::max(0.f,static_cast<float>(browser.queue_spring.update(now,reduced_motion)));
@@ -1681,10 +1832,10 @@ struct Workspace::Impl {
         ImGui::BeginDisabled(!done||!cb.file_clear_completed);
         const bool clear=button("清除已结束",ImVec2(0,layout.button_height_small),"清除队列");ImGui::EndDisabled();
         if(queue_visible){
-            const float q_alpha=std::clamp(queue_height/std::max(40.f,target_queue_h>1.f?target_queue_h:82.f),0.f,1.f);
+            const float q_alpha=std::clamp(queue_height/std::max(40.f,target_queue_h>1.f?target_queue_h:84.f),0.f,1.f);
             const ImVec2 qp=ImGui::GetCursorScreenPos();
             draw_glass_panel(ImGui::GetWindowDrawList(),qp,ImVec2(qp.x+avail.x,qp.y+queue_height),
-                             layout.child_rounding-3.f,theme,q_alpha*page_alpha,false,0.025f);
+                             layout.child_rounding-3.f,theme,q_alpha*page_alpha,false,0.030f,true);
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha,q_alpha*page_alpha);
             ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
             ImGui::BeginChild("传输队列",ImVec2(0,queue_height),ImGuiChildFlags_AlwaysUseWindowPadding);
@@ -1694,26 +1845,35 @@ struct Workspace::Impl {
                 ImGui::PushID(static_cast<int>(t.id));
                 const char* states[]={"排队中","传输中","已完成","失败","已取消"};
                 const char* status=t.cancel_requested&&!finished?"正在取消":states[static_cast<int>(t.state)];
-                const ImU32 tint=t.state==app::TransferState::Failed?theme.danger:t.state==app::TransferState::Completed?theme.success:theme.muted;
+                const ImU32 tint=t.state==app::TransferState::Failed?theme.danger:(t.state==app::TransferState::Completed?theme.success:(theme.dark?theme.accent_hover:theme.accent));
                 const auto filename=t.source.substr(t.source.find_last_of(t.upload&&app::windows_file_path(false)?"/\\":"/")+1);
                 const std::string title=std::string(t.upload?"上传 · ":"下载 · ")+show_filename(filename);
-                ImGui::TextColored(tone(tint),"%s",status);ImGui::SameLine();
-                ImGui::TextUnformatted(elide(ImGui::GetFont(),ImGui::GetFontSize(),title,ImGui::GetContentRegionAvail().x).c_str());
+                const bool has_bytes=t.total_bytes||t.state==app::TransferState::Completed;
+                const std::string bytes=has_bytes?(file_size(t.completed_bytes)+" / "+file_size(t.total_bytes)):"";
+                const bool has_cancel=!finished&&cb.file_cancel!=nullptr;
+                const float right_reserve=(has_bytes?ImGui::CalcTextSize(bytes.c_str()).x+14.f:0.f)+(has_cancel?64.f:0.f);
+                ImGui::TextColored(tone(tint),"%s",status);ImGui::SameLine(0,8.f);
+                ImGui::TextUnformatted(elide(ImGui::GetFont(),ImGui::GetFontSize(),title,std::max(40.f,ImGui::GetContentRegionAvail().x-right_reserve)).c_str());
                 if(ImGui::IsItemHovered())ImGui::SetTooltip("源：%s\n目标：%s",t.source.c_str(),t.destination.c_str());
-                if(t.total_bytes||t.state==app::TransferState::Completed){
+                if(has_bytes||has_cancel){
+                    const float right_edge=ImGui::GetWindowContentRegionMax().x;
+                    const float meta_w=(has_bytes?ImGui::CalcTextSize(bytes.c_str()).x:0.f)+(has_cancel?(has_bytes?10.f:0.f)+52.f:0.f);
+                    ImGui::SameLine(std::max(ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x+8.f,right_edge-meta_w));
+                    if(has_bytes) label(bytes);
+                    if(has_cancel){
+                        if(has_bytes)ImGui::SameLine(0,8.f);
+                        ImGui::BeginDisabled(t.cancel_requested);
+                        if(small_button("取消","取消任务"))cb.file_cancel(t.id);
+                        ImGui::EndDisabled();
+                    }
+                }
+                if(has_bytes){
                     const float ratio=t.total_bytes?static_cast<float>(std::min(1.0,static_cast<double>(t.completed_bytes)/t.total_bytes)):1.f;
-                    const auto bytes=file_size(t.completed_bytes)+" / "+file_size(t.total_bytes);
-                    const bool has_cancel=!finished&&cb.file_cancel!=nullptr;
-                    draw_glass_progress_bar(ratio,has_cancel?-78.f:-1.f,ImGui::GetFrameHeight(),bytes.c_str());
-                    if(has_cancel)ImGui::SameLine();
+                    draw_glass_progress_bar(ratio,-1.f,layout.progress_bar_height,nullptr);
                 }
                 if(!t.error.empty())ImGui::TextWrapped("%s",t.error.c_str());
-                if(!finished&&cb.file_cancel){
-                    ImGui::BeginDisabled(t.cancel_requested);
-                    if(small_button("取消任务","取消任务"))cb.file_cancel(t.id);
-                    ImGui::EndDisabled();
-                }
-                ImGui::Separator();ImGui::PopID();
+                ImGui::Dummy(ImVec2(0,2.f));
+                ImGui::PopID();
             };
             for(const auto& t:m.transfers)if(t.session_id==s.id&&app::transfer_active(t.state))task_row(t);
             for(auto it=m.transfers.rbegin();it!=m.transfers.rend();++it)if(it->session_id==s.id&&!app::transfer_active(it->state))task_row(*it);
@@ -1733,7 +1893,7 @@ struct Workspace::Impl {
         (void)cb;
         const ImVec2 bar_pos=ImGui::GetCursorScreenPos();
         const float bar_w=ImGui::GetContentRegionAvail().x;
-        draw_glass_well(ImGui::GetWindowDrawList(),bar_pos,ImVec2(bar_pos.x+bar_w,bar_pos.y+layout.metrics_bar_height),10.f,theme);
+        draw_glass_well(ImGui::GetWindowDrawList(),bar_pos,ImVec2(bar_pos.x+bar_w,bar_pos.y+layout.metrics_bar_height),layout.metrics_bar_height*0.5f,theme);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(12,7));
         ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
         ImGui::BeginChild("资源概况",ImVec2(0,layout.metrics_bar_height),ImGuiChildFlags_AlwaysUseWindowPadding,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse);
@@ -2121,7 +2281,7 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         draw_jelly_pill(ImGui::GetWindowDrawList(),
                         ImVec2(group_origin.x+gpill.x,group_origin.y+gpill.y),
                         ImVec2(group_origin.x+gpill.x+gpill.w,group_origin.y+gpill.y+gpill.h),
-                        9.f,gpill.stretch_x,gpill.stretch_y,v.theme,true);
+                        layout.select_height*0.5f,gpill.stretch_x,gpill.stretch_y,v.theme,true,1.f,gpill.glint);
     }
     if(v.selectable("全部设备",v.group.empty(),0,ImVec2(item_width,layout.select_height),"分组全部",false))v.group.clear();
     for(const auto& g:groups)if(v.selectable(g.c_str(),v.group==g,0,ImVec2(item_width,layout.select_height),("分组"+g).c_str(),false))v.group=g;
@@ -2158,11 +2318,10 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         auto* dl=ImGui::GetWindowDrawList();
         const ImVec2 pa(list_origin.x+dpill.x,list_origin.y+dpill.y+dev_scroll.rubber_offset*0.4f);
         const ImVec2 pb(pa.x+dpill.w,pa.y+dpill.h);
-        draw_jelly_pill(dl,pa,pb,layout.device_outline_rounding,dpill.stretch_x,dpill.stretch_y,v.theme,true);
-        // Slim glowing liquid accent bar on the left rim.
-        const float bar_h=std::max(14.f,dpill.h*0.48f);
+        draw_jelly_pill(dl,pa,pb,layout.device_outline_rounding,dpill.stretch_x,dpill.stretch_y,v.theme,true,1.f,dpill.glint);
+        const float bar_h=std::max(14.f,dpill.h*0.44f);
         const float bar_y=(pa.y+pb.y-bar_h)*0.5f;
-        dl->AddRectFilled(ImVec2(pa.x+3.f,bar_y),ImVec2(pa.x+6.f,bar_y+bar_h),v.theme.accent_hover,2.f);
+        dl->AddRectFilled(ImVec2(pa.x+3.5f,bar_y),ImVec2(pa.x+6.2f,bar_y+bar_h),v.theme.accent_hover,2.f);
     }
     // The clipper step must equal the drawn row height, otherwise the visible
     // row estimate drifts and the list scrolls unevenly.
@@ -2286,9 +2445,9 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         auto* dl=ImGui::GetWindowDrawList();
         if(!tabs.empty()) {
             const float rail_w=std::max(1.f,cursor_x-layout.tab_gap+6.f);
-            draw_glass_well(dl,ImVec2(rail_origin.x-3.f,rail_origin.y-2.f),
-                            ImVec2(rail_origin.x-3.f+rail_w,rail_origin.y+layout.tab_height+2.f),
-                            layout.tab_rounding+2.f,v.theme);
+            draw_glass_well(dl,ImVec2(rail_origin.x-3.f,rail_origin.y-2.5f),
+                            ImVec2(rail_origin.x-3.f+rail_w,rail_origin.y+layout.tab_height+2.5f),
+                            (layout.tab_height+5.f)*0.5f,v.theme);
         }
         LiquidPillAnimator::Rect tpill{};
         if(active_tab_idx>=0) {
@@ -2298,7 +2457,7 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
             draw_jelly_pill(dl,
                             ImVec2(rail_origin.x+tpill.x,rail_origin.y+tpill.y),
                             ImVec2(rail_origin.x+tpill.x+tpill.w,rail_origin.y+tpill.y+tpill.h),
-                            layout.tab_rounding,tpill.stretch_x,tpill.stretch_y,v.theme,false);
+                            layout.tab_rounding,tpill.stretch_x,tpill.stretch_y,v.theme,false,1.f,tpill.glint);
         }
         for(std::size_t i=0;i<m.sessions.size();++i) {
             const auto& s=m.sessions[i];
@@ -2353,18 +2512,19 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
         ImGui::BeginChild("欢迎卡片",ImVec2(0,0),false);
         const ImVec2 region=ImGui::GetContentRegionAvail();
-        const float block=std::clamp(region.x-48.f,300.f,580.f);
+        const float block=std::clamp(region.x-48.f,300.f,560.f);
         const float left_base=ImGui::GetCursorPosX();
         const float left=(region.x-block)*0.5f;
         ImGui::SetCursorPosY(ImGui::GetCursorPosY()+std::max(layout.welcome_top_min,region.y*layout.welcome_top_ratio));
-        const ImVec2 icon_pos(ImGui::GetCursorScreenPos().x+left+(block-60.f)*0.5f,ImGui::GetCursorScreenPos().y);
+        const ImVec2 hero_start=ImGui::GetCursorScreenPos();
         auto* dl=ImGui::GetWindowDrawList();
-        const ImVec2 icon_c(icon_pos.x+30.f,icon_pos.y+30.f);
-        draw_soft_orb(dl,icon_c,58.f,fade_color(v.theme.accent,v.theme.dark?0.40f:0.30f));
-        dl->AddCircleFilled(icon_c,40.f,fade_color(v.theme.glass_bg_strong,v.theme.dark?0.45f:0.72f),48);
-        dl->AddCircle(icon_c,40.f,fade_color(v.theme.glass_rim_top,0.65f),48,1.1f);
-        v.draw_brand_icon(icon_pos,60.f);
-        ImGui::Dummy(ImVec2(block,70.f));
+        const ImVec2 icon_pos(hero_start.x+left+(block-62.f)*0.5f,hero_start.y);
+        const ImVec2 icon_c(icon_pos.x+31.f,icon_pos.y+31.f);
+        draw_soft_orb(dl,icon_c,72.f,fade_color(v.theme.accent,v.theme.dark?0.42f:0.32f));
+        dl->AddCircleFilled(icon_c,42.f,fade_color(v.theme.glass_bg_strong,v.theme.dark?0.42f:0.68f),48);
+        dl->AddCircle(icon_c,42.f,fade_color(v.theme.glass_rim_top,0.75f),48,1.15f);
+        v.draw_brand_icon(icon_pos,62.f);
+        ImGui::Dummy(ImVec2(block,74.f));
         const char* welcome_title="下一段旅程，从安全连接开始";
         float title_width=0.f;
         if(fonts.heading) {
@@ -2375,33 +2535,57 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         ImGui::TextUnformatted(welcome_title);
         if(fonts.heading)ImGui::PopFont();
         ImGui::Spacing();
-        ImGui::SetCursorPosX(left_base+left);
-        ImGui::PushTextWrapPos(left_base+left+block);
-        ImGui::TextColored(tone(v.theme.muted),"欢迎使用 JianSSH。设备库目前%s。这里不展示模拟服务器或虚构的监控数据。",m.hosts.empty()?"为空":"已就绪");
-        ImGui::PopTextWrapPos();
+        const std::string sub_text=std::string("欢迎使用 JianSSH。设备库目前")+(m.hosts.empty()?"为空":"已就绪")+"。这里不展示模拟服务器或虚构的监控数据。";
+        const float sub_w=ImGui::CalcTextSize(sub_text.c_str()).x;
+        if(sub_w<block) {
+            ImGui::SetCursorPosX(left_base+left+(block-sub_w)*0.5f);
+            ImGui::TextColored(tone(v.theme.muted),"%s",sub_text.c_str());
+        } else {
+            ImGui::SetCursorPosX(left_base+left);
+            ImGui::PushTextWrapPos(left_base+left+block);
+            ImGui::TextColored(tone(v.theme.muted),"%s",sub_text.c_str());
+            ImGui::PopTextWrapPos();
+        }
         ImGui::Spacing();ImGui::Spacing();
+
+        // Floating translucent Apple Liquid Glass onboarding card.
+        const float card_w=std::min(block,452.f);
+        const float card_left=left+(block-card_w)*0.5f;
+        const ImVec2 card_a(ImGui::GetCursorScreenPos().x+card_left,ImGui::GetCursorScreenPos().y);
+        const float card_h=196.f;
+        draw_glass_panel(dl,card_a,ImVec2(card_a.x+card_w,card_a.y+card_h),20.f,v.theme,v.page_alpha,false,0.045f,true);
+
+        ImGui::Dummy(ImVec2(0,18.f));
         const char* steps[]={"新增设备或使用快速连接","独立核对首次连接的服务器指纹","在真实终端中开始工作"};
-        const float steps_block=std::min(block,390.f);
+        const float steps_block=std::min(card_w-48.f,320.f);
         const ImVec2 steps_origin=ImGui::GetCursorScreenPos();
-        const float steps_x=steps_origin.x+(block-steps_block)*0.5f;
+        const float steps_x=card_a.x+(card_w-steps_block)*0.5f;
         for(int i=0;i<3;++i) {
-            const float y=steps_origin.y+i*34.f;
-            const ImVec2 badge_c(steps_x+12.f,y+12.f);
-            dl->AddCircleFilled(badge_c,12.f,fade_color(v.theme.accent,v.theme.dark?0.18f:0.12f),28);
-            dl->AddCircle(badge_c,12.f,fade_color(v.theme.accent,0.44f),28,1.0f);
+            const float y=steps_origin.y+i*35.f;
+            const ImVec2 badge_c(steps_x+13.f,y+12.f);
+            dl->AddCircleFilled(badge_c,12.5f,fade_color(v.theme.accent,v.theme.dark?0.22f:0.14f),28);
+            dl->AddCircle(badge_c,12.5f,fade_color(v.theme.dark?v.theme.accent_hover:v.theme.accent,0.58f),28,1.05f);
             char number[4];std::snprintf(number,sizeof(number),"%02d",i+1);
             const float nw=ImGui::CalcTextSize(number).x;
-            dl->AddText(ImVec2(badge_c.x-nw*0.5f,badge_c.y-ImGui::GetFontSize()*0.5f),v.theme.accent,number);
-            dl->AddText(ImVec2(steps_x+36.f,y+3.f),v.theme.ink,steps[i]);
+            dl->AddText(ImVec2(badge_c.x-nw*0.5f,badge_c.y-ImGui::GetFontSize()*0.5f),
+                        v.theme.dark?v.theme.accent_hover:v.theme.accent,number);
+            dl->AddText(ImVec2(steps_x+38.f,y+3.f),v.theme.ink,steps[i]);
         }
-        ImGui::Dummy(ImVec2(block,3*34.f));
-        ImGui::SetCursorPosX(left_base+left+(block-layout.welcome_button_width)*0.5f);
+        ImGui::Dummy(ImVec2(block,3*35.f+12.f));
+        ImGui::SetCursorPosX(left_base+card_left+(card_w-layout.welcome_button_width)*0.5f);
         if(v.button("开始第一次连接",ImVec2(layout.welcome_button_width,layout.button_height_xl),"开始第一次连接",ButtonKind::Primary)){v.prepare_connection(chosen?*chosen:store::Host{},m);v.connect_pending=true;}
-        ImGui::Spacing();ImGui::Spacing();
-        ImGui::SetCursorPosX(left_base+left);
-        ImGui::PushTextWrapPos(left_base+left+block);
-        ImGui::TextColored(tone(v.theme.muted),"设备配置保存在本机；密码不写入设备库。连接与认证在后台执行，界面不会阻塞等待网络。");
-        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0,18.f));
+        const char* foot_note="设备配置保存在本机；密码不写入设备库。连接与认证在后台执行，界面不会阻塞等待网络。";
+        const float fn_w=ImGui::CalcTextSize(foot_note).x;
+        if(fn_w<block) {
+            ImGui::SetCursorPosX(left_base+left+(block-fn_w)*0.5f);
+            ImGui::TextColored(tone(v.theme.muted),"%s",foot_note);
+        } else {
+            ImGui::SetCursorPosX(left_base+left);
+            ImGui::PushTextWrapPos(left_base+left+block);
+            ImGui::TextColored(tone(v.theme.muted),"%s",foot_note);
+            ImGui::PopTextWrapPos();
+        }
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar();

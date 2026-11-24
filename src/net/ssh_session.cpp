@@ -199,6 +199,9 @@ std::string key_algorithm(const std::vector<std::uint8_t>& key) {
     if (n > key.size() - 4 || n > 128) return "未知";
     return std::string(reinterpret_cast<const char*>(key.data() + 4), n);
 }
+bool live_task(TaskState state) {
+    return state == TaskState::Queued || state == TaskState::Running || state == TaskState::Paused;
+}
 struct Address { sockaddr_storage addr{}; socklen_t length{}; int family{}; };
 struct ResolveResult {
     std::mutex mutex;
@@ -224,9 +227,10 @@ struct SshSession::Impl {
     std::size_t input_capacity{}, output_capacity{}, event_capacity{64};
     std::optional<std::pair<int,int>> pending_size;
     std::optional<bool> trust_answer;
+    std::optional<std::string> password_answer;
     std::uint64_t next_request{};
     std::deque<std::pair<std::uint64_t, TaskRequest>> jobs;
-    std::unordered_set<std::uint64_t> task_cancels;
+    std::unordered_set<std::uint64_t> task_cancels, task_pauses;
     std::size_t task_capacity{32};
     std::uint64_t next_task{};
     bool running{};
@@ -244,6 +248,7 @@ struct SshSession::Impl {
         TaskRequest request;
         TaskSnapshot result;
         Clock::time_point deadline{};
+        std::optional<Clock::time_point> paused_since;
         int phase{}, fd{-1}, dirfd{-1};
         std::string local_name;
         LIBSSH2_SFTP_HANDLE* handle{};
@@ -314,7 +319,8 @@ struct SshSession::Impl {
     void check_cancel() {
         if (cancelled.load()) fail(ErrorCode::Cancelled, "SSH 操作已取消");
     }
-    void wait_socket(Clock::time_point deadline, short explicit_events = 0, bool watch_socket = true) {
+    enum class SocketWatch { IO, WakeOnly, Hangup };
+    void wait_socket(Clock::time_point deadline, short explicit_events = 0, SocketWatch watch = SocketWatch::IO) {
         check_cancel();
         const auto now = Clock::now();
         if (now >= deadline) fail(ErrorCode::Timeout, "SSH 操作超时");
@@ -325,50 +331,64 @@ struct SshSession::Impl {
             if (dirs & LIBSSH2_SESSION_BLOCK_OUTBOUND) wanted |= POLLOUT;
         }
         if (!wanted) wanted = POLLIN;
+        // While awaiting user input there is no libssh2 call to advance. Watch
+        // for a closed peer, not arbitrary unread encrypted traffic (busy loop).
+        if (watch == SocketWatch::Hangup) {
+#ifdef POLLRDHUP
+            wanted = POLLRDHUP;
+#else
+            wanted = 0; // POLLHUP and POLLERR are always returned.
+#endif
+        }
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
         int timeout = static_cast<int>(std::clamp<std::int64_t>(ms + 1, 1, INT_MAX));
 #ifdef _WIN32
         // There is no POSIX self-pipe here; cap each wait so cancellation,
         // queued input and shutdown are observed promptly.
         timeout = std::min(timeout, 20);
-        if (!watch_socket || !socket_valid(socket)) {
+        if (watch == SocketWatch::WakeOnly || !socket_valid(socket)) {
             ::Sleep(static_cast<DWORD>(timeout));
             check_cancel();
             if (Clock::now() >= deadline) fail(ErrorCode::Timeout, "SSH 操作超时");
             return;
         }
-        WSAPOLLFD watch{};
-        watch.fd = socket; watch.events = wanted;
-        const int rc = ::WSAPoll(&watch, 1, timeout);
+        WSAPOLLFD fd{};
+        fd.fd = socket; fd.events = wanted;
+        const int rc = ::WSAPoll(&fd, 1, timeout);
         if (rc == SOCKET_ERROR) {
             const int error = socket_error();
             fail(ErrorCode::Network, "网络等待失败：" + socket_error_text(error), error);
         }
         check_cancel();
-        if (watch.revents & POLLNVAL) fail(ErrorCode::Network, "SSH 连接已失效", EBADF);
-        // POLLHUP/POLLERR are passed back to libssh2/getsockopt for an exact error.
-        if (!rc && Clock::now() >= deadline) fail(ErrorCode::Timeout, "SSH 操作超时");
+        const short revents = fd.revents;
 #else
-        pollfd fds[2]{{wake_read, POLLIN, 0}, {watch_socket ? socket : -1, wanted, 0}};
+        pollfd fds[2]{{wake_read, POLLIN, 0}, {watch != SocketWatch::WakeOnly ? socket : -1, wanted, 0}};
         int rc;
         do { rc = ::poll(fds, 2, timeout); } while (rc < 0 && errno == EINTR && !cancelled);
         if (rc < 0) fail(ErrorCode::Network, std::string("网络等待失败：") + socket_error_text(errno), errno);
         if (fds[0].revents) { char bytes[128]; while (::read(wake_read, bytes, sizeof(bytes)) > 0) {} }
         check_cancel();
-        if (fds[1].revents & POLLNVAL) fail(ErrorCode::Network, "SSH 连接已失效", EBADF);
+        const short revents = fds[1].revents;
+#endif
+        if (revents & POLLNVAL) fail(ErrorCode::Network, "SSH 连接已失效", EBADF);
+        if (watch == SocketWatch::Hangup && (revents & (POLLHUP | POLLERR | wanted)))
+            fail(ErrorCode::Network, "服务器已关闭认证连接");
         // POLLHUP/POLLERR are passed back to libssh2/getsockopt for an exact error.
         if (!rc && Clock::now() >= deadline) fail(ErrorCode::Timeout, "SSH 操作超时");
-#endif
     }
-    template<class F> int retry(F&& fn, Clock::time_point deadline, ErrorCode code, const char* operation) {
+    template<class F> int await_result(F&& fn, Clock::time_point deadline, const char* operation) {
         for (;;) {
             check_cancel();
             if (Clock::now() >= deadline) fail(ErrorCode::Timeout, std::string(operation) + "超时");
             const int rc = fn();
             if (rc == LIBSSH2_ERROR_EAGAIN) { wait_socket(deadline); continue; }
-            if (rc < 0) ssh_error(code, operation, rc);
             return rc;
         }
+    }
+    template<class F> int retry(F&& fn, Clock::time_point deadline, ErrorCode code, const char* operation) {
+        const int rc = await_result(fn, deadline, operation);
+        if (rc < 0) ssh_error(code, operation, rc);
+        return rc;
     }
     [[noreturn]] void ssh_error(ErrorCode code, const char* operation, int rc) {
         // libssh2's own message is English; map protocol codes to Chinese so no
@@ -426,7 +446,7 @@ struct SshSession::Impl {
             }
             const auto slice = std::min(deadline, Clock::now() + std::chrono::milliseconds(25));
             // A DNS polling slice is not the overall operation timeout.
-            try { wait_socket(slice, 0, false); } catch (const Failure& e) {
+            try { wait_socket(slice, 0, SocketWatch::WakeOnly); } catch (const Failure& e) {
                 if (e.error.code != ErrorCode::Timeout) throw;
             }
         }
@@ -502,7 +522,7 @@ struct SshSession::Impl {
                 }
             }
             // No protocol traffic/authentication while trust is pending.
-            wait_socket(deadline, 0, false);
+            wait_socket(deadline, 0, SocketWatch::WakeOnly);
         }
     }
     static void put_u32(std::vector<std::uint8_t>& out, std::uint32_t n) {
@@ -626,14 +646,65 @@ struct SshSession::Impl {
     static void* secure_alloc(std::size_t n, void**) { return std::malloc(n); }
     static void secure_free(void* data, void**) { std::free(data); }
     static void* secure_realloc(void* data, std::size_t n, void**) { return std::realloc(data, n); }
+    // libssh2_userauth_password_ex does not expose the methods advertised in
+    // USERAUTH_FAILURE. Query them once after a rejection (never while waiting
+    // for input); the peer, not a local retry count, decides when to stop.
+    void authenticate_password(ConnectOptions& options) {
+        auto& password = options.auth.password;
+        const auto user = options.user.c_str();
+        const auto user_size = static_cast<unsigned>(options.user.size());
+        for (;;) {
+            const int rc = await_result([&] {
+                return libssh2_userauth_password_ex(session, user, user_size, password.c_str(),
+                    static_cast<unsigned>(password.size()), nullptr);
+            }, Clock::now() + options.operation_timeout, "密码认证");
+            wipe(password);
+            if (!rc) return;
+            if (rc != LIBSSH2_ERROR_AUTHENTICATION_FAILED) ssh_error(ErrorCode::Authentication, "密码认证", rc);
+
+            const char* methods = nullptr;
+            retry([&] {
+                methods = libssh2_userauth_list(session, user, user_size);
+                return methods ? 0 : libssh2_session_last_errno(session);
+            }, Clock::now() + options.operation_timeout, ErrorCode::Authentication, "查询可用认证方式");
+            // A 'none' method query can itself complete authentication.
+            if (libssh2_userauth_authenticated(session)) return;
+            std::string_view remaining = methods ? methods : "";
+            for (;;) {
+                const auto comma = remaining.find(',');
+                if (remaining.substr(0, comma) == "password") break;
+                if (comma == std::string_view::npos)
+                    fail(ErrorCode::Authentication, "服务器不再接受密码认证", rc);
+                remaining.remove_prefix(comma + 1);
+            }
+            {
+                std::lock_guard lock(mutex);
+                check_cancel();
+                view.password_request_id = ++next_request;
+                view.state = SessionState::AwaitingPassword;
+                emit_locked({EventType::StateChanged, view.state, {}, {}});
+            }
+            for (;;) {
+                {
+                    std::lock_guard lock(mutex);
+                    check_cancel();
+                    if (password_answer) {
+                        password.assign(*password_answer);
+                        wipe(*password_answer); password_answer.reset();
+                        break;
+                    }
+                }
+                wait_socket(Clock::time_point::max(), 0, SocketWatch::Hangup);
+            }
+        }
+    }
     void authenticate(ConnectOptions& options) {
         state(SessionState::Authenticating);
         const auto deadline = Clock::now() + options.operation_timeout;
         auto& auth = options.auth;
         CredentialsGuard guard{auth};
         if (auth.method == AuthMethod::Password) {
-            retry([&] { return libssh2_userauth_password_ex(session, options.user.c_str(), static_cast<unsigned>(options.user.size()),
-                auth.password.c_str(), static_cast<unsigned>(auth.password.size()), nullptr); }, deadline, ErrorCode::Authentication, "密码认证");
+            authenticate_password(options);
         } else if (auth.method == AuthMethod::Key) {
             if (auth.public_key_file.empty()) {
                 std::error_code ec;
@@ -674,8 +745,10 @@ struct SshSession::Impl {
     void publish_job(Job& j) {
         std::lock_guard lock(mutex);
         for (auto& t : view.tasks) if (t.id == j.id) {
-            if (j.finishing) t = std::move(j.result);
-            else {
+            if (j.finishing) {
+                t = std::move(j.result);
+                task_cancels.erase(j.id); task_pauses.erase(j.id);
+            } else {
                 // Progress snapshots never copy growing output/directory vectors.
                 // Full payload is moved exactly once after cleanup completes.
                 t.id = j.id; t.kind = j.result.kind; t.state = j.result.state;
@@ -713,14 +786,18 @@ struct SshSession::Impl {
     // state and buffer addresses survive until that same operation is retried.
     bool task_step() {
         bool progressed = task_step_once();
-        if (active) active->pending_call = !progressed && !(active->request.kind == TaskKind::Exec && active->phase == 2);
+        if (active) active->pending_call = !progressed && !active->paused_since &&
+            !(active->request.kind == TaskKind::Exec && active->phase == 2);
         return progressed;
     }
     bool task_step_once() {
         if (!active) {
             std::lock_guard lock(mutex);
-            if (jobs.empty()) return false;
-            auto item = std::move(jobs.front()); jobs.pop_front();
+            auto ready = std::find_if(jobs.begin(), jobs.end(), [this](const auto& item) {
+                return !task_pauses.count(item.first);
+            });
+            if (ready == jobs.end()) return false;
+            auto item = std::move(*ready); jobs.erase(ready);
             active.emplace(); auto& j = *active;
             j.id = item.first; j.request = std::move(item.second);
             j.result.id = j.id; j.result.kind = j.request.kind; j.result.state = TaskState::Running;
@@ -728,13 +805,27 @@ struct SshSession::Impl {
             for (auto& t : view.tasks) if (t.id == j.id) t = j.result;
         }
         auto& j = *active;
-        bool stop;
-        { std::lock_guard lock(mutex); stop = task_cancels.count(j.id); }
-        if (stop && j.pending_call) j.deadline = std::min(j.deadline, Clock::now());
+        bool stop, pause;
+        { std::lock_guard lock(mutex); stop = task_cancels.count(j.id); pause = task_pauses.count(j.id); }
+        const auto now = Clock::now();
+        if (j.paused_since) {
+            if (!stop && pause) return false; // Park this job, not the terminal pump.
+            j.deadline += now - *j.paused_since;
+            j.paused_since.reset();
+            if (!stop) { j.result.state = TaskState::Running; publish_job(j); }
+        }
+        if (stop && j.pending_call) j.deadline = std::min(j.deadline, now);
         if (j.pending_call && Clock::now() > j.deadline + std::chrono::seconds(5))
             fail(ErrorCode::Timeout, "辅助协议操作超时，正在关闭连接");
-        if (!j.finishing && !j.pending_call && (stop || Clock::now() >= j.deadline)) {
-            finish_job(j, stop ? TaskState::Cancelled : TaskState::Failed, stop ? "任务已取消" : "任务超时");
+        if (!j.finishing && !j.pending_call) {
+            if (stop || now >= j.deadline) {
+                finish_job(j, stop ? TaskState::Cancelled : TaskState::Failed, stop ? "任务已取消" : "任务超时");
+            } else if (pause && j.phase <= 3) {
+                // Never park a libssh2 continuation, or split final verification from publication.
+                j.paused_since = now;
+                j.result.state = TaskState::Paused; publish_job(j);
+                return false;
+            }
         }
         if (j.finishing) {
             // Never abandon an in-progress channel/SFTP close on EAGAIN.
@@ -769,7 +860,6 @@ struct SshSession::Impl {
                 }
                 j.temp_created = false; return true;
             }
-            { std::lock_guard lock(mutex); task_cancels.erase(j.id); }
 #ifndef _WIN32
             if (j.dirfd >= 0) ::close(j.dirfd);
 #endif
@@ -1140,15 +1230,16 @@ struct SshSession::Impl {
             }
             progressed = task_step() || progressed;
             if (progressed || remote_eof) continue;
-            auto deadline = now + (active ? std::chrono::milliseconds(20) : std::chrono::milliseconds(1000));
+            const bool task_needs_io = active && !active->paused_since;
+            auto deadline = now + (task_needs_io ? std::chrono::milliseconds(20) : std::chrono::milliseconds(1000));
             if (write_deadline) deadline = std::min(deadline, *write_deadline);
             if (resize_deadline) deadline = std::min(deadline, *resize_deadline);
             if (keepalive_deadline) deadline = std::min(deadline, *keepalive_deadline);
             if (options.keepalive_interval.count() > 0 && keepalive_due > now) deadline = std::min(deadline, keepalive_due);
             // Avoid spinning on readable socket while the output queue is full.
             // Pending writes/resizes must still be serviced under backpressure.
-            bool watch = active.has_value() || can_read || !writing.empty() || resizing.has_value() || keepalive_deadline.has_value();
-            try { wait_socket(deadline, 0, watch); } catch (const Failure& e) {
+            bool watch = task_needs_io || can_read || !writing.empty() || resizing.has_value() || keepalive_deadline.has_value();
+            try { wait_socket(deadline, 0, watch ? SocketWatch::IO : SocketWatch::WakeOnly); } catch (const Failure& e) {
                 if (e.error.code != ErrorCode::Timeout) throw;
             }
         }
@@ -1223,8 +1314,10 @@ struct SshSession::Impl {
         for (auto& s : input) wipe(s);
         input.clear(); view.pending_input = 0;
         pending_size.reset(); trust_answer.reset(); view.host_key_request.reset();
-        jobs.clear(); task_cancels.clear();
-        for (auto& task : view.tasks) if (task.state == TaskState::Queued || task.state == TaskState::Running) {
+        if (password_answer) { wipe(*password_answer); password_answer.reset(); }
+        view.password_request_id.reset();
+        jobs.clear(); task_cancels.clear(); task_pauses.clear();
+        for (auto& task : view.tasks) if (live_task(task.state)) {
             task.state = TaskState::Cancelled; task.error = "会话已关闭";
         }
         view.error = std::move(error);
@@ -1336,6 +1429,20 @@ bool SshSession::answer_host_key(std::uint64_t request_id, bool accept) {
       p.trust_answer = accept; }
     p.wake(); return true;
 }
+bool SshSession::answer_password(std::uint64_t request_id, std::string_view password) {
+    if (password.size() > UINT_MAX) return false;
+    auto& p = *impl_;
+    {
+        std::lock_guard lock(p.mutex);
+        if (p.cancelled || p.view.state != SessionState::AwaitingPassword || p.view.password_request_id != request_id)
+            return false;
+        p.password_answer.emplace(password);
+        p.view.password_request_id.reset();
+        p.view.state = SessionState::Authenticating;
+        p.emit_locked({EventType::StateChanged, p.view.state, {}, {}});
+    }
+    p.wake(); return true;
+}
 std::uint64_t SshSession::submit_task(TaskRequest request) {
     auto valid_path = [](const std::string& text) { return !text.empty() && text.size() <= 16384 && text.find('\0') == std::string::npos; };
     if (request.kind < TaskKind::List || request.kind > TaskKind::Exec || request.permissions > 07777 ||
@@ -1365,22 +1472,41 @@ std::uint64_t SshSession::submit_task(TaskRequest request) {
     }
     p.wake(); return id;
 }
-bool SshSession::cancel_task(std::uint64_t id) {
-    auto& p = *impl_; bool found = false;
+bool SshSession::set_task_paused(std::uint64_t id, bool paused) {
+    auto& p = *impl_;
     {
         std::lock_guard lock(p.mutex);
-        for (const auto& task : p.view.tasks) if (task.id == id && (task.state == TaskState::Queued || task.state == TaskState::Running)) found = true;
-        if (found) p.task_cancels.insert(id);
+        if (p.cancelled || p.view.state != SessionState::Connected || p.task_cancels.count(id)) return false;
+        auto task = std::find_if(p.view.tasks.begin(), p.view.tasks.end(), [id](const auto& t) { return t.id == id; });
+        if (task == p.view.tasks.end() || !live_task(task->state) ||
+            (task->kind != TaskKind::Upload && task->kind != TaskKind::Download)) return false;
+        if (paused) p.task_pauses.insert(id); else p.task_pauses.erase(id);
+        // A job still in the queue owns no protocol state and needs no worker acknowledgement.
+        if (std::any_of(p.jobs.begin(), p.jobs.end(), [id](const auto& item) { return item.first == id; }))
+            task->state = paused ? TaskState::Paused : TaskState::Queued;
     }
-    if (found) p.wake();
-    return found;
+    p.wake(); return true;
+}
+bool SshSession::cancel_task(std::uint64_t id) {
+    auto& p = *impl_;
+    {
+        std::lock_guard lock(p.mutex);
+        auto task = std::find_if(p.view.tasks.begin(), p.view.tasks.end(), [id](const auto& t) { return t.id == id; });
+        if (task == p.view.tasks.end() || !live_task(task->state)) return false;
+        auto queued = std::find_if(p.jobs.begin(), p.jobs.end(), [id](const auto& item) { return item.first == id; });
+        if (queued != p.jobs.end()) {
+            p.jobs.erase(queued); p.task_pauses.erase(id);
+            task->state = TaskState::Cancelled; task->error = "任务已取消";
+        } else p.task_cancels.insert(id);
+    }
+    p.wake(); return true;
 }
 std::vector<TaskSnapshot> SshSession::poll_tasks() {
     auto& p = *impl_; std::lock_guard lock(p.mutex);
     std::vector<TaskSnapshot> result;
     auto& tasks = p.view.tasks;
     for (auto it = tasks.begin(); it != tasks.end();) {
-        if (it->state != TaskState::Queued && it->state != TaskState::Running) {
+        if (!live_task(it->state)) {
             result.push_back(std::move(*it)); it = tasks.erase(it);
         } else ++it;
     }
@@ -1390,7 +1516,7 @@ void SshSession::disconnect() {
     auto& p = *impl_;
     { std::lock_guard lock(p.mutex);
       if (!p.running) return;
-      p.cancelled = true; p.view.state = SessionState::Disconnecting;
+      p.cancelled = true; p.view.password_request_id.reset(); p.view.state = SessionState::Disconnecting;
       p.emit_locked({EventType::StateChanged, p.view.state, {}, {}}); }
     p.wake();
 }

@@ -13,7 +13,7 @@ namespace jianssh::net {
 
 enum class AuthMethod { Password, Key, Agent };
 enum class TaskKind { List, Stat, Mkdir, Rename, Remove, Chmod, Upload, Download, Exec };
-enum class TaskState { Queued, Running, Succeeded, Failed, Cancelled };
+enum class TaskState { Queued, Running, Succeeded, Failed, Cancelled, Paused };
 struct FileInfo {
     std::string name;
     std::uint64_t size{}, mtime{};
@@ -65,7 +65,7 @@ struct ConnectOptions {
     int columns{80};
     int rows{24};
 };
-enum class SessionState { Disconnected, Connecting, AwaitingHostKey, Authenticating, Connected, Disconnecting, Failed };
+enum class SessionState { Disconnected, Connecting, AwaitingHostKey, Authenticating, AwaitingPassword, Connected, Disconnecting, Failed };
 enum class ErrorCode { None, InvalidConfiguration, UnsupportedPlatform, Resolve, Network, Timeout, Cancelled, HostKeyMismatch, HostKeyRejected, Authentication, Protocol, Internal };
 struct SessionError {
     ErrorCode code{ErrorCode::None};
@@ -84,6 +84,8 @@ struct SessionSnapshot {
     SessionState state{SessionState::Disconnected};
     SessionError error;
     std::optional<HostKeyRequest> host_key_request;
+    // Present only after a rejected password, while the peer still offers password auth.
+    std::optional<std::uint64_t> password_request_id;
     std::vector<TaskSnapshot> tasks;
     std::size_t pending_input{};
     std::size_t available_output{};
@@ -122,6 +124,8 @@ public:
     // Only the current request ID is valid. Acceptance is session-local; the
     // caller must persist raw_key separately if durable trust is desired.
     bool answer_host_key(std::uint64_t request_id, bool accept);
+    // Submit exactly one replacement password on this transport, or disconnect to cancel.
+    bool answer_password(std::uint64_t request_id, std::string_view password);
     // Zero means rejected (invalid/disconnected/full). Serial auxiliary jobs,
     // one bounded network chunk per terminal pump pass; no recursive removal.
     // Download local_path MUST be an explicit absolute filename (no directory inference).
@@ -134,6 +138,12 @@ public:
     // Downloads/upload source checks detect size/mtime changes, not same-metadata
     // adversarial rewrites. Local filesystem I/O is chunked, not real-time.
     std::uint64_t submit_task(TaskRequest request);
+    // Set the desired state of a live upload/download on this connection. A true
+    // return accepts the request; snapshot().tasks reports Paused only at a safe
+    // boundary (completion can win the race). Paused queued jobs are skipped. A
+    // paused active transfer retains its serial job slot and handles; the timeout
+    // clock stops, terminal I/O continues. No resume after disconnect.
+    bool set_task_paused(std::uint64_t id, bool paused);
     // Cancellation waits for any EAGAIN continuation, then closes task handles.
     // A stalled peer exceeding a five-second cleanup grace fails the whole
     // transport rather than reusing ambiguous protocol state (snapshot.error).

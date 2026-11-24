@@ -176,6 +176,11 @@ struct Workspace::Impl {
     }
     std::string form_error;
     std::uint64_t trust_id=0, trust_session=0;
+    std::uint64_t password_session=0, password_id=0, first_connect_click=0, reveal_tab=0;
+    std::array<char,256> auth_secret{};
+    bool block_terminal_input=false, dialog_followup=false;
+    std::set<std::pair<std::uint64_t,std::uint64_t>> answered_prompts;
+    void clear_auth_secret() { wipe(auth_secret.data(),auth_secret.size()); }
     int last_cols=0,last_rows=0;
     std::uint64_t resized_session=0;
 
@@ -208,7 +213,7 @@ struct Workspace::Impl {
     float page_offset_x=0.f;
     float page_offset_y=0.f;
 
-    ~Impl() { clear_connection_secret();clear_paste(); }
+    ~Impl() { clear_connection_secret();clear_auth_secret();clear_paste(); }
     void animate(Tween& t, double to, const app::WorkspaceModel& m, double seconds) {
         t.retarget(to, now, std::chrono::duration<double>(seconds), Easing::Smoothstep, m.settings.reduced_motion);
     }
@@ -1034,9 +1039,24 @@ struct Workspace::Impl {
         if(settings_pending) {ImGui::OpenPopup("偏好设置");settings_pending=false;begin_modal();}
         if(close_pending) {ImGui::OpenPopup("关闭会话？");close_pending=false;begin_modal();}
         if(paste_pending) {ImGui::OpenPopup("确认粘贴到远端");paste_pending=false;begin_modal();}
-        if(m.trust && (trust_id!=m.trust->request_id||trust_session!=m.trust->session_id)) {
-            trust_id=m.trust->request_id;trust_session=m.trust->session_id;
-            ImGui::OpenPopup("验证服务器身份");begin_modal();
+        // Never replace another sheet (or its unsent text) with a background
+        // authentication request. Look up the displayed pair on every frame;
+        // clicking Submit must never answer a different request or session.
+        std::erase_if(answered_prompts,[&](const auto& key){
+            return std::none_of(m.sessions.begin(),m.sessions.end(),[&](const auto& s){
+                return s.id==key.first&&s.password_request_id==key.second;
+            });
+        });
+        if(!operation_pending&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopup)) {
+            if(m.trust && (trust_id!=m.trust->request_id||trust_session!=m.trust->session_id)) {
+                trust_id=m.trust->request_id;trust_session=m.trust->session_id;
+                ImGui::OpenPopup("验证服务器身份");begin_modal();
+            } else if(cb.answer_password&&cb.disconnect) {
+                for(const auto& s:m.sessions)if(s.password_request_id&&!answered_prompts.contains({s.id,s.password_request_id})) {
+                    password_session=s.id;password_id=s.password_request_id;clear_auth_secret();
+                    ImGui::OpenPopup("连接认证");begin_modal();break;
+                }
+            }
         }
         const int key_ready=poll_key_task();
         const float mp=modal_progress();
@@ -1236,12 +1256,55 @@ struct Workspace::Impl {
             if(button(show_send?"取消，不发送":"关闭",ImVec2(footer,layout.button_height),"取消粘贴")) {clear_paste();restore_terminal_focus=true;ImGui::CloseCurrentPopup();}
             ImGui::EndPopup();
         }
-        constrain_confirmation(m.trust?std::max(360.f,ImGui::CalcTextSize(m.trust->fingerprint.c_str()).x):200.f,layout.modal_width_trust,mp);
+        constrain_confirmation(360.f,layout.modal_width_confirm,mp);
+        if(ImGui::BeginPopupModal("连接认证",nullptr,kSheetFlags)) {
+            const auto target=std::find_if(m.sessions.begin(),m.sessions.end(),[&](const auto& s){
+                return s.id==password_session&&s.password_request_id==password_id;
+            });
+            if(target==m.sessions.end()||!cb.answer_password||!cb.disconnect) {
+                clear_auth_secret();ImGui::CloseCurrentPopup();dialog_followup=true;
+            } else {
+                clamp_modal_to_viewport();
+                const bool cancel_header=modal_sheet_header("连接认证");
+                const bool appearing=ImGui::IsWindowAppearing();
+                begin_confirmation_body();
+                ImGui::TextWrapped("会话：%s",target->title.c_str());
+                ImGui::TextWrapped("目标：%s",target->auth_target.c_str());
+                confirmation_note(target->status.c_str(),theme.muted);
+                label(target->key_passphrase?"私钥口令（未加密可留空）":"密码");
+                // A fresh widget id prevents ImGui's input/undo state from
+                // being reused by the next challenge, even on the same tab.
+                ImGui::PushID(std::to_string(password_id).c_str());
+                begin_frame_widget("认证口令");ImGui::SetNextItemWidth(-1);
+                if(appearing)ImGui::SetKeyboardFocusHere();
+                const bool enter=ImGui::InputText("##认证口令",auth_secret.data(),auth_secret.size(),
+                    ImGuiInputTextFlags_Password|ImGuiInputTextFlags_NoUndoRedo|ImGuiInputTextFlags_EnterReturnsTrue);
+                end_frame_widget("认证口令");ImGui::PopID();
+                end_modal_body();
+                const bool can_submit=auth_secret[0]||target->key_passphrase;
+                const float footer=confirmation_buttons("继续认证","取消连接");
+                ImGui::BeginDisabled(!can_submit);
+                const bool submit=button("继续认证",ImVec2(footer,layout.button_height_large),"继续认证",ButtonKind::Primary);
+                ImGui::EndDisabled();ImGui::SameLine(0,layout.confirm_footer_gap);
+                const bool cancel=button("取消连接",ImVec2(footer,layout.button_height_large),"取消认证")||cancel_header||ImGui::IsKeyPressed(ImGuiKey_Escape,false);
+                if(cancel||(can_submit&&(submit||enter))) {
+                    answered_prompts.emplace(password_session,password_id);
+                    std::string secret;
+                    if(!cancel)secret.assign(auth_secret.data());
+                    clear_auth_secret();ImGui::CloseCurrentPopup();dialog_followup=true;
+                    if(cancel)cb.disconnect(password_session);
+                    else cb.answer_password(password_session,password_id,std::move(secret));
+                }
+            }
+            ImGui::EndPopup();
+        }
+        const bool matching_trust=m.trust&&m.trust->session_id==trust_session&&m.trust->request_id==trust_id;
+        constrain_confirmation(matching_trust?std::max(360.f,ImGui::CalcTextSize(m.trust->fingerprint.c_str()).x):200.f,layout.modal_width_trust,mp);
         if(ImGui::BeginPopupModal("验证服务器身份",nullptr,kSheetFlags)) {
             clamp_modal_to_viewport();
             modal_sheet_header("验证服务器身份",false);
             begin_confirmation_body();
-            if(m.trust) {
+            if(matching_trust) {
                 const auto& t=*m.trust;
                 ImGui::PushStyleColor(ImGuiCol_Text,tone(theme.warning));
                 ImGui::TextWrapped("%s",t.mismatch?"警告：服务器密钥与已保存记录不一致":"首次连接 · 请独立核对服务器指纹");
@@ -1252,7 +1315,7 @@ struct Workspace::Impl {
                 if(t.mismatch)ImGui::TextWrapped("为保护连接，本界面不允许绕过密钥不匹配。请取消后由可信渠道调查密钥变更。");
             } else label("验证请求已结束。");
             end_modal_body();
-            if(m.trust) {
+            if(matching_trust) {
                 const auto& t=*m.trust;
                 const float footer=t.mismatch?confirmation_buttons("拒绝连接"):confirmation_buttons("核对后信任","拒绝连接");
                 if(!t.mismatch) {
@@ -1261,8 +1324,7 @@ struct Workspace::Impl {
                 }
                 if(button("拒绝连接",ImVec2(footer,layout.button_height_large),"拒绝连接")&&cb.trust){cb.trust(t.session_id,t.request_id,false);ImGui::CloseCurrentPopup();}
             } else {
-                const float footer=confirmation_buttons("关闭");
-                if(button("关闭",ImVec2(footer,layout.button_height),"关闭验证"))ImGui::CloseCurrentPopup();
+                ImGui::CloseCurrentPopup();dialog_followup=true;
             }
             ImGui::EndPopup();
         }
@@ -1826,7 +1888,7 @@ struct Workspace::Impl {
         }
         int active=0,done=0;
         for(const auto& t:m.transfers)if(t.session_id==s.id){if(app::transfer_active(t.state))++active;else ++done;}
-        const std::string header=std::string(browser.show_queue?"收起队列":"展开队列")+" · 进行中 "+std::to_string(active)+" / 已结束 "+std::to_string(done)+"###队列开关";
+        const std::string header=std::string(browser.show_queue?"收起队列":"展开队列")+" · 未结束 "+std::to_string(active)+" / 已结束 "+std::to_string(done)+"###队列开关";
         if(button(header.c_str(),ImVec2(0,layout.button_height_small),"队列开关"))browser.show_queue=!browser.show_queue;
         if(avail.x>=320.f)ImGui::SameLine();
         ImGui::BeginDisabled(!done||!cb.file_clear_completed);
@@ -1840,34 +1902,65 @@ struct Workspace::Impl {
             ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
             ImGui::BeginChild("传输队列",ImVec2(0,queue_height),ImGuiChildFlags_AlwaysUseWindowPadding);
             if(!active&&!done)ImGui::TextWrapped("拖拽普通文件到另一栏，或选择文件后点击上传 / 下载。Ctrl / Shift 可多选，右键打开文件菜单；同名目标不会被覆盖。");
+            std::uint64_t cancel_id=0, toggle_id=0;
+            bool request_pause=false;
             auto task_row=[&](const app::TransferTask& t){
                 const bool finished=!app::transfer_active(t.state);
                 ImGui::PushID(static_cast<int>(t.id));
-                const char* states[]={"排队中","传输中","已完成","失败","已取消"};
-                const char* status=t.cancel_requested&&!finished?"正在取消":states[static_cast<int>(t.state)];
-                const ImU32 tint=t.state==app::TransferState::Failed?theme.danger:(t.state==app::TransferState::Completed?theme.success:(theme.dark?theme.accent_hover:theme.accent));
+                using State=app::TransferState;
+                const char* status="";
+                switch(t.state){
+                    case State::Queued: status="排队中";break;
+                    case State::Running: status="传输中";break;
+                    case State::Pausing: status="正在暂停";break;
+                    case State::Paused: status="已暂停";break;
+                    case State::Resuming: status="正在恢复";break;
+                    case State::Completed: status="已完成";break;
+                    case State::Failed: status="失败";break;
+                    case State::Cancelled: status="已取消";break;
+                }
+                if(t.cancel_requested&&!finished)status="正在取消";
+                const ImU32 tint=t.state==State::Failed?theme.danger:t.state==State::Paused?theme.warning:
+                    t.state==State::Completed?theme.success:theme.dark?theme.accent_hover:theme.accent;
                 const auto filename=t.source.substr(t.source.find_last_of(t.upload&&app::windows_file_path(false)?"/\\":"/")+1);
                 const std::string title=std::string(t.upload?"上传 · ":"下载 · ")+show_filename(filename);
                 const bool has_bytes=t.total_bytes||t.state==app::TransferState::Completed;
                 const std::string bytes=has_bytes?(file_size(t.completed_bytes)+" / "+file_size(t.total_bytes)):"";
-                const bool has_cancel=!finished&&cb.file_cancel!=nullptr;
-                const float right_reserve=(has_bytes?ImGui::CalcTextSize(bytes.c_str()).x+14.f:0.f)+(has_cancel?64.f:0.f);
-                ImGui::TextColored(tone(tint),"%s",status);ImGui::SameLine(0,8.f);
-                ImGui::TextUnformatted(elide(ImGui::GetFont(),ImGui::GetFontSize(),title,std::max(40.f,ImGui::GetContentRegionAvail().x-right_reserve)).c_str());
+                const bool can_pause=!finished&&cb.file_set_paused!=nullptr;
+                const bool can_cancel=!finished&&cb.file_cancel!=nullptr;
+                const bool resume=t.state==State::Paused||t.state==State::Resuming;
+                const char* action=resume?"恢复":"暂停";
+                constexpr float gap=8.f;
+                // Match small_button's 10px horizontal padding on both sides.
+                const float pause_w=can_pause?ImGui::CalcTextSize(action).x+20.f:0.f;
+                const float cancel_w=can_cancel?ImGui::CalcTextSize("取消").x+20.f:0.f;
+                const float actions_w=pause_w+cancel_w+(can_pause&&can_cancel?gap:0.f);
+                const float bytes_w=has_bytes?ImGui::CalcTextSize(bytes.c_str()).x:0.f;
+                const float meta_w=actions_w+bytes_w+(actions_w&&has_bytes?gap:0.f);
+                const float row_w=ImGui::GetContentRegionAvail().x;
+                const float right=ImGui::GetCursorPosX()+row_w;
+                const bool inline_meta=row_w>=ImGui::CalcTextSize(status).x+2*gap+4*ImGui::GetFontSize()+meta_w;
+                ImGui::TextColored(tone(tint),"%s",status);ImGui::SameLine(0,gap);
+                ImGui::TextUnformatted(elide(ImGui::GetFont(),ImGui::GetFontSize(),title,ImGui::GetContentRegionAvail().x-(inline_meta?meta_w+gap:0.f)).c_str());
                 if(ImGui::IsItemHovered())ImGui::SetTooltip("源：%s\n目标：%s",t.source.c_str(),t.destination.c_str());
-                if(has_bytes||has_cancel){
-                    const float right_edge=ImGui::GetWindowContentRegionMax().x;
-                    const float meta_w=(has_bytes?ImGui::CalcTextSize(bytes.c_str()).x:0.f)+(has_cancel?(has_bytes?10.f:0.f)+52.f:0.f);
-                    ImGui::SameLine(std::max(ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x+8.f,right_edge-meta_w));
-                    if(has_bytes) label(bytes);
-                    if(has_cancel){
-                        if(has_bytes)ImGui::SameLine(0,8.f);
-                        ImGui::BeginDisabled(t.cancel_requested);
-                        if(small_button("取消","取消任务"))cb.file_cancel(t.id);
-                        ImGui::EndDisabled();
-                    }
+                if(inline_meta&&meta_w)ImGui::SameLine(right-meta_w);
+                if(can_pause){
+                    ImGui::BeginDisabled(t.cancel_requested||t.state==State::Pausing||t.state==State::Resuming);
+                    const auto hover_id="暂停任务"+std::to_string(t.id);
+                    if(small_button(action,hover_id.c_str())){toggle_id=t.id;request_pause=!resume;}
+                    ImGui::EndDisabled();
+                    if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",resume?"在当前连接内恢复传输":"保留进度，仅在当前连接内可恢复");
+                }
+                if(can_cancel){
+                    if(can_pause&&row_w>=actions_w)ImGui::SameLine(0,gap);
+                    ImGui::BeginDisabled(t.cancel_requested);
+                    const auto hover_id="取消任务"+std::to_string(t.id);
+                    if(small_button("取消",hover_id.c_str()))cancel_id=t.id;
+                    ImGui::EndDisabled();
                 }
                 if(has_bytes){
+                    if(actions_w&&row_w>=meta_w)ImGui::SameLine(0,gap);
+                    label(bytes);
                     const float ratio=t.total_bytes?static_cast<float>(std::min(1.0,static_cast<double>(t.completed_bytes)/t.total_bytes)):1.f;
                     draw_glass_progress_bar(ratio,-1.f,layout.progress_bar_height,nullptr);
                 }
@@ -1878,6 +1971,8 @@ struct Workspace::Impl {
             for(const auto& t:m.transfers)if(t.session_id==s.id&&app::transfer_active(t.state))task_row(t);
             for(auto it=m.transfers.rbegin();it!=m.transfers.rend();++it)if(it->session_id==s.id&&!app::transfer_active(it->state))task_row(*it);
             ImGui::EndChild();ImGui::PopStyleColor();ImGui::PopStyleVar();
+            if(toggle_id)cb.file_set_paused(toggle_id,request_pause);
+            if(cancel_id)cb.file_cancel(cancel_id);
         }
         if(clear)cb.file_clear_completed(s.id);
         ImGui::PopID();
@@ -1945,7 +2040,7 @@ struct Workspace::Impl {
         }
         if(ImGui::IsItemClicked()) {terminal_focus=true;ImGui::SetWindowFocus();}
         if(ImGui::IsMouseClicked(0)&&!ImGui::IsItemHovered())terminal_focus=false;
-        const bool report_mouse=s.connected&&s.terminal->scroll_offset()==0&&s.terminal->mouse_tracking()&&(!ImGui::GetIO().KeyShift||terminal_mouse_buttons)&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle;
+        const bool report_mouse=!block_terminal_input&&s.connected&&s.terminal->scroll_offset()==0&&s.terminal->mouse_tracking()&&(!ImGui::GetIO().KeyShift||terminal_mouse_buttons)&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle;
         if(!report_mouse&&ImGui::IsItemHovered()&&ImGui::GetIO().MouseWheel!=0.f&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)&&page.phase()==PageTransition::Phase::Idle) {
             const float wheel=ImGui::GetIO().MouseWheel;
             s.terminal->scroll(wheel>0?std::max(1,static_cast<int>(wheel*3)):std::min(-1,static_cast<int>(wheel*3)));
@@ -2067,7 +2162,7 @@ struct Workspace::Impl {
             if(glass_menu_item("粘贴", "Ctrl+Shift+V", s.connected)) {request_paste(s);}
             end_glass_popup();
         } else if(terminal_menu_open) {terminal_menu_open=false;if(!paste_pending&&!ImGui::IsMouseClicked(0))restore_terminal_focus=true;}
-        if(!terminal_focus||!s.connected||ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)||!ImGui::IsWindowFocused())return;
+        if(block_terminal_input||!terminal_focus||!s.connected||ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId)||!ImGui::IsWindowFocused())return;
         if(page.phase()!=PageTransition::Phase::Idle)return;
         terminal_input_active=true;
         auto& io=ImGui::GetIO();
@@ -2115,7 +2210,7 @@ bool Workspace::animation_active()const noexcept {
     return v.entrance.active()||v.selection.active()||v.hover.active()||v.modal.active()||
            v.theme_fade.active()||v.notice_fade.active()||v.hover_anim.active()||v.toggle_anim.active()||
            v.pill_anim.active()||v.scroll_anim.active()||
-           v.page.active()||v.loading_visible||static_cast<bool>(v.key_task);
+           v.page.active()||v.loading_visible||v.dialog_followup||static_cast<bool>(v.key_task);
 }
 Rgba Workspace::background_color()const noexcept {
     const auto c=ImGui::ColorConvertU32ToFloat4(impl_->theme.window_bg);
@@ -2129,7 +2224,9 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     v.hover_anim.begin_frame(v.frame_counter);
     v.pill_anim.begin_frame(v.frame_counter);
     v.scroll_anim.begin_frame(v.frame_counter);
-    v.terminal_input_active=false;
+    v.terminal_input_active=false;v.dialog_followup=false;
+    v.block_terminal_input=m.trust.has_value()||std::any_of(m.sessions.begin(),m.sessions.end(),[](const auto& s){return s.password_request_id!=0;});
+    if(v.block_terminal_input){v.terminal_focus=false;v.restore_terminal_focus=false;}
     v.now=now;
     v.reduced_motion=m.settings.reduced_motion;
     v.resolve_theme(m);
@@ -2234,6 +2331,29 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     // nominal status-bar height, so fixed panels do not overflow the viewport.
     const float footer_height=6.f+std::max(18.f,ImGui::GetTextLineHeight());
     const float height=std::max(1.f,full.y-ImGui::GetStyle().ItemSpacing.y-std::max(layout.status_bar_height,footer_height));
+    // Bind both presses to one item, even if the list changes between clicks.
+    const auto previous_click=v.first_connect_click;
+    if(ImGui::IsMouseClicked(ImGuiMouseButton_Left))v.first_connect_click=0;
+    auto double_clicked=[&](std::uint64_t key){
+        if(!ImGui::IsItemClicked(ImGuiMouseButton_Left))return false;
+        v.first_connect_click=key;
+        return key==previous_click&&ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+    };
+    std::uint64_t duplicate_source=0,retry_source=0;
+    std::int64_t open_host_id=0;
+    auto duplicate_on_double_click=[&](const app::SessionView& s,const char* area){
+        if(!s.connected||!ImGui::IsItemHovered())return;
+        if(s.type==app::SessionType::Serial){
+            ImGui::SetTooltip("串口由当前会话独占，不能建立独立连接。");return;
+        }
+        if(!cb.duplicate)return;
+        if(double_clicked(anim_key(area,s.id)))duplicate_source=s.id;
+        if(ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))ImGui::SetTooltip("双击为此 SSH 会话建立独立连接");
+    };
+    auto status_hit=[&](const char* area,ImVec2 size){
+        ImGui::InvisibleButton(area,size);
+        if(active)duplicate_on_double_click(*active,area);
+    };
     const store::Host* chosen=nullptr;for(const auto& h:m.hosts)if(h.id==v.selected_host){chosen=&h;break;}
     if(show_devices){
     const float side_alpha=.30f+.70f*entry_side;
@@ -2256,7 +2376,13 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     if(!session_layout){ImGui::Spacing();ImGui::Spacing();}
     if(devices_only&&v.button("返回会话",ImVec2(-1,layout.button_height_small),"返回会话"))v.narrow_devices=false;
     if(session_layout&&v.button("＋ 快速连接",ImVec2(-1,layout.button_height_small),"快速连接",ButtonKind::Primary)){v.prepare_connection({},m);v.connect_pending=true;}
-    if(session_layout&&chosen&&v.button("连接所选设备",ImVec2(-1,layout.button_height_small),"连接所选设备")){v.prepare_connection(*chosen,m);v.connect_pending=true;}
+    if(session_layout){
+        // Reserve this row before selection too: showing it on the first click
+        // would move the device name/address away from the second click.
+        ImGui::BeginDisabled(!chosen);
+        if(v.button("连接所选设备",ImVec2(-1,layout.button_height_small),"连接所选设备")&&chosen){v.prepare_connection(*chosen,m);v.connect_pending=true;}
+        ImGui::EndDisabled();
+    }
     v.search_field("搜索名称、地址或用户",v.search.data(),v.search.size(),"搜索设备");
     ImGui::Spacing();
     if(v.button("＋ 新增设备",ImVec2(-1,layout.button_height),"新增设备")) {v.prepare_connection({},m);v.edit_pending=true;}
@@ -2340,7 +2466,10 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
             v.selected_host=h.id;
             v.selection.start(0,1,now,std::chrono::duration<double>(motion.selection),Easing::EaseOutCubic,v.reduced_motion);
             v.prepare_connection(h,m);
-            if(ImGui::IsMouseDoubleClicked(0))v.connect_pending=true;
+        }
+        if(double_clicked(row_key)) {
+            if(h.connection_type=="ssh"&&cb.open_host)open_host_id=h.id;
+            else v.connect_pending=true; // Keep the explicit serial-open confirmation.
         }
         ImGui::PopStyleColor(3);
         const bool over=ImGui::IsItemHovered();any_hover|=over;
@@ -2390,27 +2519,40 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     const float header_width=ImGui::GetContentRegionAvail().x;
     const float content_right=ImGui::GetWindowContentRegionMax().x;
     if(!session_layout){
-    const bool show_connect=header_width>=430.f;
-    const bool full_actions=header_width>=640.f;
-    // Toolbar: large title left, commands aligned to the right edge.
+    const ImVec2 toolbar=ImGui::GetCursorScreenPos();
+    const char* quick_label="＋ 快速连接";
+    constexpr float action_gap=8.f, title_gap=18.f;
+    auto command_width=[](const char* text,float preferred){
+        return std::max(preferred,ImGui::CalcTextSize(text).x+2.f*ImGui::GetStyle().FramePadding.x);
+    };
+    const float quick_w=std::min(header_width,command_width(quick_label,110.f));
+    const float connect_w=command_width("连接设备",96.f), small_w=command_width("编辑",52.f);
+    const float button_h=std::max(layout.button_height_small,ImGui::GetFrameHeight());
     if(fonts.heading)ImGui::PushFont(fonts.heading);
+    const ImVec2 title_size=ImGui::CalcTextSize("连接工作台");
+    const float room=header_width-title_size.x-title_gap;
+    const bool inline_actions=room>=quick_w;
+    const bool show_connect=room>=quick_w+action_gap+connect_w;
+    const bool full_actions=room>=quick_w+action_gap+connect_w+2.f*(action_gap+small_w);
+    const float actions_w=quick_w+(show_connect?action_gap+connect_w:0.f)+(full_actions?2.f*(action_gap+small_w):0.f);
+    const float row_h=std::max(title_size.y,button_h);
+    if(inline_actions)ImGui::SetCursorScreenPos(ImVec2(toolbar.x,toolbar.y+(row_h-title_size.y)*0.5f));
     ImGui::TextUnformatted("连接工作台");
     if(fonts.heading)ImGui::PopFont();
-    const float title_end=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
-    constexpr float quick_w=110.f, connect_w=96.f, small_w=52.f;
-    const float actions_width=quick_w+(show_connect?8.f+connect_w:0.f)+(full_actions?16.f+small_w*2.f:0.f);
-    ImGui::SameLine(std::max(title_end+22.f,content_right-actions_width));
-    if(v.button("＋ 快速连接",ImVec2(quick_w,layout.button_height_small),"快速连接",ButtonKind::Primary)){v.prepare_connection({},m);v.connect_pending=true;}
+    // Anchor to the actual padded content rectangle. If the primary command
+    // doesn't fit beside the title, give it its own row (and full hit box).
+    if(inline_actions)ImGui::SetCursorScreenPos(ImVec2(toolbar.x+header_width-actions_w,toolbar.y+(row_h-button_h)*0.5f));
+    if(v.button(quick_label,ImVec2(inline_actions?quick_w:header_width,button_h),"快速连接",ButtonKind::Primary)){v.prepare_connection({},m);v.connect_pending=true;}
     ImGui::BeginDisabled(!chosen);
     if(show_connect) {
-        ImGui::SameLine(0,8.f);
-        if(v.button("连接设备",ImVec2(connect_w,layout.button_height_small),"连接设备")&&chosen){v.prepare_connection(*chosen,m);v.connect_pending=true;}
+        ImGui::SameLine(0,action_gap);
+        if(v.button("连接设备",ImVec2(connect_w,button_h),"连接设备")&&chosen){v.prepare_connection(*chosen,m);v.connect_pending=true;}
     }
     if(full_actions) {
-        ImGui::SameLine(0,8.f);
-        if(v.button("编辑",ImVec2(small_w,layout.button_height_small),"编辑设备")&&chosen){v.prepare_connection(*chosen,m);v.edit_pending=true;}
-        ImGui::SameLine(0,8.f);
-        if(v.button("删除",ImVec2(small_w,layout.button_height_small),"删除设备")&&chosen){v.prepare_connection(*chosen,m);v.delete_pending=true;}
+        ImGui::SameLine(0,action_gap);
+        if(v.button("编辑",ImVec2(small_w,button_h),"编辑设备")&&chosen){v.prepare_connection(*chosen,m);v.edit_pending=true;}
+        ImGui::SameLine(0,action_gap);
+        if(v.button("删除",ImVec2(small_w,button_h),"删除设备")&&chosen){v.prepare_connection(*chosen,m);v.delete_pending=true;}
     }
     ImGui::EndDisabled();
     {
@@ -2481,10 +2623,15 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
             const float close_left=tab_pos.x+tab_width-text_padding-close_width+2.f;
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(0,0));
             ImGui::SetCursorScreenPos(tab_pos);
-            if(ImGui::InvisibleButton("##选择会话",ImVec2(close_left-tab_pos.x,layout.tab_height))) {
+            const bool activated=ImGui::InvisibleButton("##选择会话",ImVec2(close_left-tab_pos.x,layout.tab_height));
+            // The release of a double-click must not switch back to the source
+            // after its new tab has been selected. Keep keyboard activation.
+            if(ImGui::IsItemClicked()||(activated&&!ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 v.selected=s.id;v.selection.start(0,1,now,std::chrono::duration<double>(motion.selection),Easing::EaseOutCubic,v.reduced_motion);v.terminal_focus=false;
             }
             const bool tab_hovered=ImGui::IsItemHovered();
+            duplicate_on_double_click(s,"会话标签名称");
+            if(v.reveal_tab==s.id){ImGui::SetScrollHereX(0.5f);v.reveal_tab=0;}
             ImGui::SetCursorScreenPos(ImVec2(close_left,tab_pos.y));
             if(ImGui::InvisibleButton("##关闭会话",ImVec2(close_width,layout.tab_height))) {v.close_session=s.id;v.close_title=s.title;v.close_pending=true;}
             const bool close_hovered=ImGui::IsItemHovered();
@@ -2512,114 +2659,118 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
         ImGui::BeginChild("欢迎卡片",ImVec2(0,0),false);
         const ImVec2 region=ImGui::GetContentRegionAvail();
-        const float block=std::clamp(region.x-48.f,300.f,560.f);
-        const float left_base=ImGui::GetCursorPosX();
-        const float left=(region.x-block)*0.5f;
-        ImGui::SetCursorPosY(ImGui::GetCursorPosY()+std::max(layout.welcome_top_min,region.y*layout.welcome_top_ratio));
-        const ImVec2 hero_start=ImGui::GetCursorScreenPos();
-        auto* dl=ImGui::GetWindowDrawList();
-        const ImVec2 icon_pos(hero_start.x+left+(block-62.f)*0.5f,hero_start.y);
-        const ImVec2 icon_c(icon_pos.x+31.f,icon_pos.y+31.f);
-        draw_soft_orb(dl,icon_c,72.f,fade_color(v.theme.accent,v.theme.dark?0.42f:0.32f));
-        dl->AddCircleFilled(icon_c,42.f,fade_color(v.theme.glass_bg_strong,v.theme.dark?0.42f:0.68f),48);
-        dl->AddCircle(icon_c,42.f,fade_color(v.theme.glass_rim_top,0.75f),48,1.15f);
-        v.draw_brand_icon(icon_pos,62.f);
-        ImGui::Dummy(ImVec2(block,74.f));
-        const char* welcome_title="下一段旅程，从安全连接开始";
-        float title_width=0.f;
-        if(fonts.heading) {
-            ImGui::PushFont(fonts.heading);
-            title_width=fonts.heading->CalcTextSizeA(fonts.heading->FontSize,1000.f,0.f,welcome_title).x;
-        } else title_width=ImGui::CalcTextSize(welcome_title).x;
-        ImGui::SetCursorPosX(left_base+left+(block-title_width)*0.5f);
-        ImGui::TextUnformatted(welcome_title);
-        if(fonts.heading)ImGui::PopFont();
-        ImGui::Spacing();
-        const std::string sub_text=std::string("欢迎使用 JianSSH。设备库目前")+(m.hosts.empty()?"为空":"已就绪")+"。这里不展示模拟服务器或虚构的监控数据。";
-        const float sub_w=ImGui::CalcTextSize(sub_text.c_str()).x;
-        if(sub_w<block) {
-            ImGui::SetCursorPosX(left_base+left+(block-sub_w)*0.5f);
-            ImGui::TextColored(tone(v.theme.muted),"%s",sub_text.c_str());
-        } else {
-            ImGui::SetCursorPosX(left_base+left);
-            ImGui::PushTextWrapPos(left_base+left+block);
-            ImGui::TextColored(tone(v.theme.muted),"%s",sub_text.c_str());
+        const float block=std::max(1.f,std::min(560.f,region.x-std::min(48.f,region.x*0.08f)));
+        const float center_x=ImGui::GetCursorPosX()+region.x*0.5f;
+        const bool compact=ImGui::GetWindowHeight()<460.f||block<300.f;
+        auto centered_text=[&](const char* text){
+            const float w=std::min(block,ImGui::CalcTextSize(text).x);
+            ImGui::SetCursorPosX(center_x-w*0.5f);
+            ImGui::PushTextWrapPos(center_x+block*0.5f);
+            ImGui::TextUnformatted(text);
             ImGui::PopTextWrapPos();
-        }
-        ImGui::Spacing();ImGui::Spacing();
+        };
+        const float icon_size=compact?48.f:62.f;
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(compact?layout.welcome_top_min:std::max(layout.welcome_top_min,ImGui::GetWindowHeight()*layout.welcome_top_ratio)));
+        ImGui::SetCursorPosX(center_x-icon_size*0.5f);
+        const ImVec2 icon_pos=ImGui::GetCursorScreenPos();
+        const ImVec2 icon_c(icon_pos.x+icon_size*0.5f,icon_pos.y+icon_size*0.5f);
+        auto* dl=ImGui::GetWindowDrawList();
+        draw_soft_orb(dl,icon_c,icon_size+10.f,fade_color(v.theme.accent,v.theme.dark?0.42f:0.32f));
+        dl->AddCircleFilled(icon_c,icon_size*0.5f+11.f,fade_color(v.theme.glass_bg_strong,v.theme.dark?0.42f:0.68f),48);
+        dl->AddCircle(icon_c,icon_size*0.5f+11.f,fade_color(v.theme.glass_rim_top,0.75f),48,1.15f);
+        v.draw_brand_icon(icon_pos,icon_size);
+        ImGui::Dummy(ImVec2(icon_size,icon_size+12.f));
+        if(fonts.heading)ImGui::PushFont(fonts.heading);
+        centered_text("下一段旅程，从安全连接开始");
+        if(fonts.heading)ImGui::PopFont();
+        if(!compact)ImGui::Spacing();
+        const std::string sub_text=std::string("欢迎使用 JianSSH。设备库目前")+(m.hosts.empty()?"为空":"已就绪")+"。这里不展示模拟服务器或虚构的监控数据。";
+        ImGui::PushStyleColor(ImGuiCol_Text,tone(v.theme.muted));
+        centered_text(sub_text.c_str());
+        ImGui::PopStyleColor();
+        if(!compact)ImGui::Spacing();
 
-        // Floating translucent Apple Liquid Glass onboarding card.
+        // Allocate the whole card once. Paint and hit-test in that rectangle,
+        // instead of advancing separate cursors for the glass, steps and CTA.
         const float card_w=std::min(block,452.f);
-        const float card_left=left+(block-card_w)*0.5f;
-        const ImVec2 card_a(ImGui::GetCursorScreenPos().x+card_left,ImGui::GetCursorScreenPos().y);
-        const float card_h=196.f;
-        draw_glass_panel(dl,card_a,ImVec2(card_a.x+card_w,card_a.y+card_h),20.f,v.theme,v.page_alpha,false,0.045f,true);
-
-        ImGui::Dummy(ImVec2(0,18.f));
+        const float pad_x=std::min(24.f,card_w*0.08f), pad_y=compact?12.f:18.f;
+        const float inner_w=std::max(1.f,card_w-2.f*pad_x);
+        const float steps_w=std::min(inner_w,320.f), text_w=std::max(1.f,steps_w-38.f);
         const char* steps[]={"新增设备或使用快速连接","独立核对首次连接的服务器指纹","在真实终端中开始工作"};
-        const float steps_block=std::min(card_w-48.f,320.f);
-        const ImVec2 steps_origin=ImGui::GetCursorScreenPos();
-        const float steps_x=card_a.x+(card_w-steps_block)*0.5f;
-        for(int i=0;i<3;++i) {
-            const float y=steps_origin.y+i*35.f;
-            const ImVec2 badge_c(steps_x+13.f,y+12.f);
+        std::array<float,3> text_h{};
+        const float step_gap=compact?6.f:10.f;
+        float steps_h=2.f*step_gap;
+        for(int i=0;i<3;++i){
+            text_h[i]=ImGui::CalcTextSize(steps[i],nullptr,false,text_w).y;
+            steps_h+=std::max(25.f,text_h[i]);
+        }
+        const float button_w=std::min(inner_w,layout.welcome_button_width);
+        const float button_h=std::max(layout.button_height_xl,ImGui::GetFrameHeight());
+        const float card_h=2.f*pad_y+steps_h+layout.item_spacing+button_h;
+        ImGui::SetCursorPosX(center_x-card_w*0.5f);
+        const ImVec2 card_a=ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(card_w,card_h));
+        const ImVec2 after_card=ImGui::GetCursorScreenPos();
+        draw_glass_panel(dl,card_a,ImVec2(card_a.x+card_w,card_a.y+card_h),20.f,v.theme,v.page_alpha,false,0.045f,true);
+        const float steps_x=card_a.x+(card_w-steps_w)*0.5f;
+        float y=card_a.y+pad_y;
+        for(int i=0;i<3;++i){
+            const float row_h=std::max(25.f,text_h[i]);
+            const ImVec2 badge_c(steps_x+13.f,y+row_h*0.5f);
             dl->AddCircleFilled(badge_c,12.5f,fade_color(v.theme.accent,v.theme.dark?0.22f:0.14f),28);
             dl->AddCircle(badge_c,12.5f,fade_color(v.theme.dark?v.theme.accent_hover:v.theme.accent,0.58f),28,1.05f);
             char number[4];std::snprintf(number,sizeof(number),"%02d",i+1);
             const float nw=ImGui::CalcTextSize(number).x;
             dl->AddText(ImVec2(badge_c.x-nw*0.5f,badge_c.y-ImGui::GetFontSize()*0.5f),
                         v.theme.dark?v.theme.accent_hover:v.theme.accent,number);
-            dl->AddText(ImVec2(steps_x+38.f,y+3.f),v.theme.ink,steps[i]);
+            dl->AddText(ImGui::GetFont(),ImGui::GetFontSize(),ImVec2(steps_x+38.f,y+(row_h-text_h[i])*0.5f),v.theme.ink,steps[i],nullptr,text_w);
+            y+=row_h+step_gap;
         }
-        ImGui::Dummy(ImVec2(block,3*35.f+12.f));
-        ImGui::SetCursorPosX(left_base+card_left+(card_w-layout.welcome_button_width)*0.5f);
-        if(v.button("开始第一次连接",ImVec2(layout.welcome_button_width,layout.button_height_xl),"开始第一次连接",ButtonKind::Primary)){v.prepare_connection(chosen?*chosen:store::Host{},m);v.connect_pending=true;}
-        ImGui::Dummy(ImVec2(0,18.f));
-        const char* foot_note="设备配置保存在本机；密码不写入设备库。连接与认证在后台执行，界面不会阻塞等待网络。";
-        const float fn_w=ImGui::CalcTextSize(foot_note).x;
-        if(fn_w<block) {
-            ImGui::SetCursorPosX(left_base+left+(block-fn_w)*0.5f);
-            ImGui::TextColored(tone(v.theme.muted),"%s",foot_note);
-        } else {
-            ImGui::SetCursorPosX(left_base+left);
-            ImGui::PushTextWrapPos(left_base+left+block);
-            ImGui::TextColored(tone(v.theme.muted),"%s",foot_note);
-            ImGui::PopTextWrapPos();
-        }
+        ImGui::SetCursorScreenPos(ImVec2(card_a.x+(card_w-button_w)*0.5f,card_a.y+card_h-pad_y-button_h));
+        if(v.button("开始第一次连接",ImVec2(button_w,button_h),"开始第一次连接",ButtonKind::Primary)){v.prepare_connection(chosen?*chosen:store::Host{},m);v.connect_pending=true;}
+        ImGui::SetCursorScreenPos(after_card);
+        ImGui::PushStyleColor(ImGuiCol_Text,tone(v.theme.muted));
+        centered_text("设备配置保存在本机；密码不写入设备库。连接与认证在后台执行，界面不会阻塞等待网络。");
+        ImGui::PopStyleColor();
         ImGui::EndChild();
         ImGui::PopStyleColor();
         ImGui::PopStyleVar();
     };
     if(active) {
         const bool can_files=active->type==app::SessionType::Ssh&&active->capabilities.file_transfer;
-        const char* disconnect_label=active->connected?"断开连接":"结束会话";
+        const bool offer_retry=active->can_retry&&cb.retry;
+        const char* action_label=offer_retry?"重试连接":active->connected?"断开连接":"结束会话";
         static const char* view_labels[]={"终端","文件传输"};
         const float seg_width=can_files?v.segmented_width(view_labels,2):0.f;
-        const float disconnect_width=ImGui::CalcTextSize(disconnect_label).x+24.f;
-        // In very narrow windows the session tab's close button already offers
-        // the same action. Keep the mode selector on a single toolbar row.
-        const bool show_disconnect=header_width>=seg_width+disconnect_width+95.f;
-        const float right_width=seg_width+(show_disconnect?disconnect_width+(can_files?10.f:0.f):0.f);
+        const float action_width=ImGui::CalcTextSize(action_label).x+24.f;
+        // The tab already has a close button. On a narrow toolbar keep Retry
+        // available instead of hiding it along with the redundant close action.
+        const bool show_action=offer_retry||header_width>=seg_width+action_width+95.f;
+        const bool action_inline=!can_files||header_width>=seg_width+action_width+10.f;
+        const float right_width=seg_width+(show_action&&action_inline?action_width+(can_files?10.f:0.f):0.f);
         const bool status_inline=ImGui::GetContentRegionAvail().x>=right_width+85.f;
         const float status_max=status_inline?ImGui::GetContentRegionAvail().x-right_width-28.f:ImGui::GetContentRegionAvail().x-18.f;
         const ImVec2 status_pos=ImGui::GetCursorScreenPos();
-        ImGui::Dummy(ImVec2(14,18));ImGui::SameLine(0,0);
+        const auto status_label=elide(ImGui::GetFont(),ImGui::GetFontSize(),active->status,status_max);
+        const float status_width=ImGui::GetContentRegionAvail().x-(status_inline&&right_width>0.f?right_width+12.f:0.f);
+        status_hit("##会话状态栏",ImVec2(std::max(1.f,status_width),std::max(18.f,ImGui::GetTextLineHeight())));
         {
             auto* dl=ImGui::GetWindowDrawList();
             const ImU32 dot=active->connected?v.theme.success:v.theme.muted;
             dl->AddCircleFilled(ImVec2(status_pos.x+5,status_pos.y+9),3.2f,dot);
             if(active->connected)dl->AddCircle(ImVec2(status_pos.x+5,status_pos.y+9),6.2f,fade_color(dot,0.24f),18,1.f);
         }
-        v.label(elide(ImGui::GetFont(),ImGui::GetFontSize(),active->status,status_max));
+        ImGui::GetWindowDrawList()->AddText(ImVec2(status_pos.x+14.f,status_pos.y),v.theme.muted,status_label.c_str());
         const float label_end=ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x;
         if(status_inline&&right_width>0)ImGui::SameLine(std::max(label_end+12.f,content_right-right_width));
         if(can_files) {
             const int clicked=v.segmented("视图切换",view_labels,2,v.view);
             if(clicked>=0)v.view=clicked;
-            if(show_disconnect)ImGui::SameLine(0,10.f);
+            if(show_action&&action_inline)ImGui::SameLine(0,10.f);
         }
-        if(show_disconnect&&v.button(disconnect_label,ImVec2(disconnect_width,layout.button_height_small),"断开会话")) {
-            v.close_session=active->id;v.close_title=active->title;v.close_pending=true;
+        if(show_action&&v.button(action_label,ImVec2(action_width,layout.button_height_small),offer_retry?"重试会话":"断开会话",offer_retry?ButtonKind::Primary:ButtonKind::Secondary)) {
+            if(offer_retry)retry_source=active->id;
+            else {v.close_session=active->id;v.close_title=active->title;v.close_pending=true;}
         }
         if(!active->error.empty()) {
             if(active->type==app::SessionType::Serial) v.serial_error("##串口会话错误",active->error);
@@ -2682,10 +2833,31 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
         v.label(mode_status);
         ImGui::SameLine(0,18.f);
         v.label(theme_status);
+        if(active&&active->connected){
+            ImGui::SetCursorScreenPos(status_origin);
+            status_hit("##全局状态栏",ImVec2(status_width,footer_height));
+        }
     }
     v.dialogs(m,cb);
     v.feature_dialogs(m,cb);
     ImGui::End();pop_theme();ImGui::PopStyleVar(17);
     if(fonts.regular)ImGui::PopFont();
+    // Dispatch only after releasing every reference to the current model:
+    // a facade is allowed to publish/reallocate the session list immediately.
+    if(retry_source){
+        v.browsers.erase(retry_source);
+        if(v.paste_session==retry_source){v.clear_paste();v.paste_pending=false;}
+        v.resized_session=0;v.selection_session=0;v.terminal_mouse_buttons=0;
+        v.terminal_focus=v.restore_terminal_focus=false;
+        cb.retry(retry_source);
+    } else if(duplicate_source||open_host_id){
+        const auto id=open_host_id?cb.open_host(open_host_id):cb.duplicate(duplicate_source);
+        if(id){
+            v.narrow_devices=false;
+            v.selected=v.reveal_tab=id;v.view=0;
+            v.terminal_focus=v.restore_terminal_focus=false;
+            v.selection.start(0,1,now,std::chrono::duration<double>(motion.selection),Easing::EaseOutCubic,v.reduced_motion);
+        }
+    }
 }
 } // namespace jianssh::ui

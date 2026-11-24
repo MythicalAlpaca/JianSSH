@@ -24,6 +24,10 @@ struct SessionView {
     bool connected = false;
     SessionType type = SessionType::Ssh;
     SessionCapabilities capabilities;
+    bool can_retry = false; // Terminal failure / unrequested disconnect, not an in-flight attempt.
+    std::uint64_t password_request_id{}; // Nonzero only while an explicit credential response is needed.
+    bool key_passphrase = false;
+    std::string auth_target; // Display identity, never a secret.
 };
 struct TrustRequest {
     std::uint64_t session_id{}, request_id{};
@@ -59,8 +63,11 @@ struct FilePane {
     bool operation_failed = false;
     std::vector<FileEntry> entries;
 };
-enum class TransferState { Queued, Running, Completed, Failed, Cancelled };
-inline bool transfer_active(TransferState state) { return state==TransferState::Queued||state==TransferState::Running; }
+enum class TransferState { Queued, Running, Completed, Failed, Cancelled, Pausing, Paused, Resuming };
+// Active includes suspended work: keep it visible, deduplicated and cancellable.
+inline bool transfer_active(TransferState state) {
+    return state!=TransferState::Completed && state!=TransferState::Failed && state!=TransferState::Cancelled;
+}
 struct TransferTask {
     std::uint64_t id{}, session_id{}, completed_bytes{}, total_bytes{};
     std::string source, destination, error; bool upload = true;
@@ -128,6 +135,17 @@ struct WorkspaceCallbacks {
     std::function<void(net::SerialOptions)> serial_connect;
     // Enqueue enumeration off the UI thread; publish results through WorkspaceModel.
     std::function<void()> serial_refresh;
+    std::function<void(std::uint64_t)> retry;
+    // Open an independent SSH connection; return its new id, or 0 on refusal.
+    std::function<std::uint64_t(std::uint64_t)> duplicate;
+    // The receiver checks both ids and wipes its owned secret. Cancel uses disconnect.
+    std::function<void(std::uint64_t, std::uint64_t, std::string)> answer_password;
+    // Open a saved SSH device by id, using its bound credential or prompting first.
+    // Returns the new session id, or 0 (including serial: use its explicit connect form).
+    std::function<std::uint64_t(std::int64_t)> open_host;
+    // Uses the view transfer ID, not the native task ID. True accepts a new request;
+    // for submitted work, wait for the worker to confirm pause/resume before toggling again.
+    std::function<bool(std::uint64_t transfer_id, bool paused)> file_set_paused;
 };
 }
 namespace jianssh::ui {

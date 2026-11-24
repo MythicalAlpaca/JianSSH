@@ -24,14 +24,17 @@ A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh
 - Background, non-blocking SSH I/O with a single owner thread; interactive PTY, window resize, and bounded output backpressure.
 - libvterm-based terminal rendering with a 2000-line scrollback limit.
 - Input, paste, and PTY resize never block the UI thread; paste is previewed and size-limited before confirmation.
-- No automatic reconnect and no replay of previous input. Reconnecting is always an explicit user action.
+- After a disconnect, click **Retry** in the same tab without re-entering the address. JianSSH never reconnects automatically or replays unsent input.
+- If an SSH password is rejected, enter another on the same connection. Prompts stop when the peer stops accepting passwords or disconnects.
+- Double-click a saved SSH device’s name or address to connect in a new tab. Double-click a connected SSH tab’s name (or IP), its green **Connected** indicator, or the footer to open an independent session for that target. A single click only selects. The original stays connected. Host-key checks still apply, and credentials that were not remembered must be entered again. Serial sessions can be retried but an open port is not duplicated.
 
 ### File transfer
 
 - Local and remote panes retain their own paths and filters per session. Jump to the home or parent directory, refresh, enter a path, filter by name, or show hidden entries. Sort by name, size, or modification time. Panes stack in narrow windows.
 - Select multiple regular files with Ctrl (or ⌘), Shift, or Select All, then upload/download them. Drag a single file to the other pane or directly onto a directory there. Right-click to copy the full path, rename, delete a file, or change permissions; create directories from the toolbar.
-- The collapsible queue shows byte progress and error details and supports cancellation and clearing finished tasks. It retains up to 256 entries globally, dropping the oldest finished entry first when full. Transfers run in order within each session.
-- Existing files are never overwritten. Recursive transfer/delete, directory deletion, resumable transfers, and concurrent transfers within one session are not supported.
+- Expand the queue in the file-transfer view to pause, resume, or cancel an upload or download. An in-flight chunk may finish before the task shows **Paused**. **Resume** continues from the retained position without retransmitting the whole file.
+- A paused in-progress transfer holds its session’s worker slot: subsequent transfers, remote directory listings, and monitoring samples wait until it is resumed or cancelled. A paused task that has not been dispatched is skipped. The SSH terminal and other sessions stay usable. The queue retains up to 256 entries globally and supports clearing finished records.
+- Existing files are never overwritten. Recursive transfer/delete, directory deletion, and concurrent transfers within one session are not supported. After disconnecting, closing the session or exiting the app, start the transfer again.
 - Transfer temporary files use `0600` permissions; failures never "roll back" by deleting the destination.
 
 ### Remote monitoring
@@ -192,7 +195,7 @@ Saving serial devices upgrades the database schema to version 3 while preserving
 - Encrypted credentials use a Linux local key. Anyone holding both ciphertext and key can decrypt them; this does not replace account or disk security. Rollback detection and `mlock` are not provided, so an attacker controlling the current user can access secrets. Windows has no DPAPI (or equivalent) backend, so credentials are never persisted there.
 - Host keys are stored only in the application database. Importing OpenSSH hashed `known_hosts` and a key-replacement UI are not supported.
 - Select visible terminal text by dragging and use the right-click menu to copy or paste. Ctrl+Shift+C copies, and Ctrl+Shift+V or Shift+Insert pastes (confirmation required). Ctrl+C still sends an interrupt. Search, full scrollback browsing, and comprehensive compatibility regression are still missing; vim, tmux, and IME behavior require continued validation.
-- Advanced SFTP capabilities (concurrency, pause, resume, recursive directories, and so on) are not implemented and are planned for a future release.
+- SFTP pause/resume applies to the current connection only. No resume record is persisted across reconnects or application restarts.
 - Remote monitoring supports Linux targets only. macOS/Windows targets, multi-hop bastions, proxies, and port forwarding are not implemented.
 - Windows artifacts have been validated on real hardware. The vault, SSH Agent, and local chmod are unavailable on that target, and system-theme detection is unavailable (System mode falls back to dark).
 - There is no auto-update, telemetry, or cloud sync. All host profiles and credentials stay on the local machine.

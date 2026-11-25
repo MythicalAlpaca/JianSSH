@@ -4,7 +4,7 @@
 
 A lightweight SSH desktop client built with C++20, Zig, Dear ImGui, SDL2, libssh2, mbedTLS, libvterm, and SQLite.
 
-> **Project status: 1.0.0 stable.** Both Linux x86_64 and Windows x86_64 have been validated on real hardware. On Windows the credential vault, SSH Agent, local chmod, and system-theme detection remain unavailable or limited; see Platform support and Security model below. Features and data formats are stable for this release and may continue to evolve.
+> **Project status: Desktop release.** Both Linux x86_64 and Windows x86_64 have been validated on real hardware. On Windows the credential vault, SSH Agent, local chmod, and system-theme detection remain unavailable or limited; see Platform support and Security model below. Features and data formats are stable for this release and may continue to evolve.
 
 ## Features
 
@@ -108,6 +108,12 @@ Both scripts verify source SHA256 checksums and build only inside the dedicated 
 The default build requires both Linux and Windows static dependencies and stops on the first failure. `./build.sh all` is equivalent to the default; additional Zig build options may follow the target argument. Only the two x86_64 desktop targets above are currently supported; macOS is not included.
 
 The final link uses explicit static archives only. At runtime the application still depends on the system glibc, X11/Wayland, and OpenGL drivers. Fonts and icons are embedded at build time, so no sidecar resources are needed at runtime.
+
+### Build version
+
+The build embeds its version in the executable. Find it in the window title, Preferences, or `--version`; on Windows it is also in the executable’s **Properties → Details**.
+
+Starting from the `1.00.00` baseline, the build counts first-parent Git commits that change the JianSSH directory, including merged changes as a single step. It carries every 100 commits into the middle field and every 10,000 into the first field (for example, `1.00.99 → 1.01.00`). Rebuilds and uncommitted changes do not increment it. Run `python3 tools/generate_version.py` to preview the version. Source exports and shallow checkouts default to `1.00.00`; packagers can set a version explicitly, e.g. `JIANSSH_VERSION=1.00.09`.
 
 ### Command-line options
 

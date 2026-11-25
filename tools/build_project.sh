@@ -73,6 +73,7 @@ if [[ ! -f "$crypto_dir/libcredential_crypto.a" || src/zig/crypto.zig -nt "$cryp
  printf '%s\n' "$target" > "$crypto_dir/target.txt"
 fi
 libs+=("$PWD/$crypto_dir/libcredential_crypto.a")
+python3 tools/generate_version.py --header build/generated/jianssh_version.h
 python3 tools/embed_assets.py
 python3 tools/prepare_imgui_backend.py "$imgui/backends/imgui_impl_opengl3.cpp" build/generated/imgui_impl_opengl3.cpp
 test -f "$sdl/lib/$platform/libSDL2.a" || { echo 'Real desktop SDL missing, cannot use headless musl archives' >&2; exit 1; }
@@ -83,8 +84,9 @@ fi
 icon_res=
 if [[ $platform == windows ]]; then
  icon_res=build/icon.res
- if [[ ! -f $icon_res || assets/icon.ico -nt $icon_res || assets/icon.rc -nt $icon_res ]]; then
-   zig rc /fo "$icon_res" assets/icon.rc
+ if [[ ! -f $icon_res || assets/icon.ico -nt $icon_res || assets/icon.rc -nt $icon_res ||
+       build/generated/jianssh_version.h -nt $icon_res ]]; then
+   zig rc /i build/generated /fo "$icon_res" assets/icon.rc
  fi
 fi
 objects=()

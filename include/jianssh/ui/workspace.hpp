@@ -158,6 +158,7 @@ struct Rgba { float r = 0.f, g = 0.f, b = 0.f, a = 1.f; };
 class Workspace {
 public:
     Workspace();
+    explicit Workspace(std::string_view version);
     ~Workspace();
     Workspace(const Workspace&) = delete;
     Workspace& operator=(const Workspace&) = delete;

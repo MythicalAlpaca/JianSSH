@@ -11,6 +11,7 @@
 #include "ui_sans.hpp"
 #include "ui_glyphs.hpp"
 #include "app_icon.hpp"
+#include "jianssh_version.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -24,6 +25,16 @@
 
 namespace {
 using Clock=std::chrono::steady_clock;
+constexpr char kVersion[]=JIANSSH_VERSION_STRING;
+constexpr char kWindowTitle[]="JianSSH " JIANSSH_VERSION_STRING " · 从容连接";
+void print_version(){
+#ifdef _WIN32
+ constexpr char platform[]="Windows";
+#else
+ constexpr char platform[]="Linux";
+#endif
+ std::printf("JianSSH %s（%s 桌面版）\n",kVersion,platform);
+}
 std::filesystem::path config_path(){
  if(auto* p=std::getenv("XDG_CONFIG_HOME");p&&*p)return std::filesystem::path(p)/"JianSSH/jianssh.db";
 #ifdef _WIN32
@@ -52,14 +63,15 @@ int run_application(int argc,char**argv){
     int win_w=1280,win_h=800;
     jianssh::app::ThemeMode theme=jianssh::app::ThemeMode::System;
     for(int i=1;i<argc;++i){std::string a=argv[i];
-    if(a=="--version"){std::puts(
-#ifdef _WIN32
-     "JianSSH 1.0.0（Windows 桌面版）"
-#else
-     "JianSSH 1.0.0（Linux 桌面版）"
-#endif
-    );return 0;}
-    if(a=="--help"){std::puts("JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件] [--data-dir 目录] [--reduced-motion] [--theme system|dark|light] [--window 宽x高]");return 0;}
+    if(a=="--version"){print_version();return 0;}
+    if(a=="--help"){
+     print_version();
+     std::puts("用法：\n"
+               "  JianSSH --version  显示版本后退出\n"
+               "  JianSSH --help     显示用法后退出\n"
+               "  JianSSH [--smoke-ms 毫秒] [--screenshot 文件.bmp] [--metrics 文件] [--data-dir 目录] [--reduced-motion] [--theme system|dark|light] [--window 宽x高]");
+     return 0;
+    }
     if(a=="--reduced-motion")reduced=true;
     else if(a=="--window"&&i+1<argc){std::string v=argv[++i];int w=0,h=0;
      if(std::sscanf(v.c_str(),"%dx%d",&w,&h)!=2||w<300||h<200||w>8192||h>8192){std::fprintf(stderr,"窗口尺寸必须为 宽x高，且范围在 300x200..8192x8192 之间\n");return 1;}
@@ -126,7 +138,7 @@ int run_application(int argc,char**argv){
  mark("SDL");
  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION,3);SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,SDL_GL_CONTEXT_PROFILE_CORE);
  SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,0);SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,0);
- SDL_Window* window=SDL_CreateWindow("JianSSH · 从容连接",SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,win_w,win_h,SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
+ SDL_Window* window=SDL_CreateWindow(kWindowTitle,SDL_WINDOWPOS_CENTERED,SDL_WINDOWPOS_CENTERED,win_w,win_h,SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI);
  if(!window){join_fonts();std::fputs("窗口创建失败\n",stderr);SDL_Quit();return 1;}
  SDL_SetWindowMinimumSize(window,300,200);auto gl=SDL_GL_CreateContext(window);
  if(!gl){join_fonts();std::fputs("无法创建 OpenGL 3.3 上下文\n",stderr);SDL_DestroyWindow(window);SDL_Quit();return 1;}
@@ -143,7 +155,7 @@ int run_application(int argc,char**argv){
  try{
   jianssh::app::WorkspaceController controller(database);auto cb=controller.callbacks();auto setting=controller.model().settings;setting.reduced_motion=reduced;setting.theme=theme;cb.setting(setting);
   mark("控制器");
-   jianssh::ui::Workspace workspace;
+   jianssh::ui::Workspace workspace(kVersion);
   // Follow the display refresh rate so animations are paced at the panel's
   // native cadence instead of a fixed 60 Hz timer; clamp runaway drivers.
   int refresh_hz=60;

@@ -46,6 +46,8 @@ std::string elide(ImFont* font, float size, std::string_view text, float max_wid
 } // namespace
 
 struct Workspace::Impl {
+    explicit Impl(std::string_view app_version):version(app_version) {}
+    const std::string version;
     std::uint64_t selected = 0;
     std::uint64_t close_session = 0;
     std::string close_title;
@@ -1186,6 +1188,7 @@ struct Workspace::Impl {
             clamp_modal_to_viewport();
             if(modal_sheet_header("偏好设置")) ImGui::CloseCurrentPopup();
             begin_modal_body(modal_body_height(290));
+            if(!version.empty())ImGui::TextColored(tone(theme.muted),"JianSSH %s",version.c_str());
             auto s=m.settings;
             bool changed=false;
             label("交互");
@@ -2200,7 +2203,8 @@ struct Workspace::Impl {
         io.WantCaptureKeyboard=true;io.WantTextInput=true;
     }
 };
-Workspace::Workspace():impl_(std::make_unique<Impl>()) {}
+Workspace::Workspace():Workspace(std::string_view{}) {}
+Workspace::Workspace(std::string_view version):impl_(std::make_unique<Impl>(version)) {}
 Workspace::~Workspace()=default;
 bool Workspace::terminal_input_active()const noexcept { return impl_->terminal_input_active; }
 bool Workspace::animation_active()const noexcept {

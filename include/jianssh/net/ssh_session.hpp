@@ -38,6 +38,7 @@ struct TaskSnapshot {
     int exit_status{};
     std::string listed_path;
     bool listing_truncated{};
+    bool conflict{};
 };
 struct AuthConfig {
     AuthMethod method{AuthMethod::Password};

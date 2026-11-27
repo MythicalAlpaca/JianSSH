@@ -103,7 +103,8 @@ struct WorkspaceController::Impl {
   }}};
   cb.setting=[this](WorkspaceSettings s){view.settings=s;};
   cb.file_list=[this](std::uint64_t id,bool remote,std::string p){list(id,remote,std::move(p));};
-   cb.file_transfer=[this](std::uint64_t id,bool upload,std::string source,std::string dest){return transfer(id,upload,std::move(source),std::move(dest));};
+   cb.file_transfer=[this](std::uint64_t id,bool upload,std::string source,std::string dest){return transfer(id,upload,std::move(source),std::move(dest),false);};
+   cb.file_transfer_ex=[this](std::uint64_t id,bool upload,std::string source,std::string dest,bool overwrite){return transfer(id,upload,std::move(source),std::move(dest),overwrite);};
    cb.file_set_paused=[this](std::uint64_t id,bool paused){return set_transfer_paused(id,paused);};
    cb.file_cancel=[this](std::uint64_t id){for(auto&t:view.transfers)if(t.id==id&&transfer_active(t.state)){
     auto it=transfer_jobs.find(id);
@@ -353,11 +354,12 @@ struct WorkspaceController::Impl {
   p.operation_message=(p.operation_failed?error:"操作成功")+" · "+path;
   if(!p.operation_failed)refresh_changed(id,remote,path);
  }
- void finish_transfer(std::uint64_t id,TransferState state,std::string error){for(auto&t:view.transfers)if(t.id==id){t.state=state;t.cancel_requested=false;t.error=std::move(error);break;}transfer_jobs.erase(id);}
- bool transfer(std::uint64_t id,bool upload,std::string source,std::string dest){auto*s=find(id);if(!s||!s->ssh||s->closing||shutting_down||s->previous!=net::SessionState::Connected)return false;
-  if(std::any_of(view.transfers.begin(),view.transfers.end(),[&](const auto& t){return t.session_id==id&&t.upload==upload&&transfer_active(t.state)&&t.source==source&&t.destination==dest;}))return false;
+ void finish_transfer(std::uint64_t id,TransferState state,std::string error,bool conflict=false){for(auto&t:view.transfers)if(t.id==id){t.state=state;t.cancel_requested=false;t.conflict=conflict;t.error=std::move(error);break;}transfer_jobs.erase(id);}
+ bool transfer(std::uint64_t id,bool upload,std::string source,std::string dest,bool overwrite=false){auto*s=find(id);if(!s||!s->ssh||s->closing||shutting_down||s->previous!=net::SessionState::Connected)return false;
+  if(std::any_of(view.transfers.begin(),view.transfers.end(),[&](const auto& t){return t.session_id==id&&t.upload==upload&&transfer_active(t.state)&&t.destination==dest;}))return false;
+  std::erase_if(view.transfers,[&](const auto& t){return t.session_id==id&&t.upload==upload&&!transfer_active(t.state)&&t.conflict&&t.source==source;});
   if(view.transfers.size()>=256){auto i=std::find_if(view.transfers.begin(),view.transfers.end(),[](auto&t){return !transfer_active(t.state);});if(i!=view.transfers.end())view.transfers.erase(i);else return false;}
-  TransferTask t;t.id=next_transfer++;t.session_id=id;t.upload=upload;t.source=std::move(source);t.destination=std::move(dest);view.transfers.push_back(std::move(t));
+  TransferTask t;t.id=next_transfer++;t.session_id=id;t.upload=upload;t.overwrite=overwrite;t.source=std::move(source);t.destination=std::move(dest);view.transfers.push_back(std::move(t));
   return true;
  }
  bool set_transfer_paused(std::uint64_t id,bool paused){
@@ -387,7 +389,7 @@ struct WorkspaceController::Impl {
   }
   if(shutting_down||std::any_of(transfer_jobs.begin(),transfer_jobs.end(),[&](const auto& job){return job.second.first==s.id;}))return false;
   for(const auto& t:view.transfers)if(t.session_id==s.id&&t.state==TransferState::Queued){
-   net::TaskRequest r;r.kind=t.upload?net::TaskKind::Upload:net::TaskKind::Download;r.local_path=t.upload?t.source:t.destination;r.remote_path=t.upload?t.destination:t.source;
+   net::TaskRequest r;r.kind=t.upload?net::TaskKind::Upload:net::TaskKind::Download;r.local_path=t.upload?t.source:t.destination;r.remote_path=t.upload?t.destination:t.source;r.overwrite=t.overwrite;
    auto valid=[](const std::string& p){return !p.empty()&&p.size()<=16384&&p.find('\0')==std::string::npos;};
    if(!valid(r.local_path)||!valid(r.remote_path)||!native_file_path(r.local_path).is_absolute()||r.local_path.back()=='/'){
     finish_transfer(t.id,TransferState::Failed,"文件路径无效或过长");changed=true;continue;
@@ -437,7 +439,7 @@ struct WorkspaceController::Impl {
     if(complete&&t.state==net::TaskState::Succeeded)refresh_changed(s.id,v.upload,v.destination);
     break;
    }
-   if(complete)finish_transfer(j.transfer,t.state==net::TaskState::Succeeded?TransferState::Completed:t.state==net::TaskState::Cancelled?TransferState::Cancelled:TransferState::Failed,t.error);
+   if(complete)finish_transfer(j.transfer,t.state==net::TaskState::Succeeded?TransferState::Completed:t.state==net::TaskState::Cancelled?TransferState::Cancelled:TransferState::Failed,t.error,t.conflict);
   }
   else if(complete&&j.kind==JobKind::List&&generations[{s.id,true}]==j.generation){auto&p=pane(s.id,true);p.loading=false;p.error=t.error;if(t.state==net::TaskState::Succeeded){p.path=t.listed_path;p.truncated=t.listing_truncated;++p.revision;p.entries.clear();for(auto&e:t.entries)p.entries.push_back({e.name,e.size,static_cast<std::int64_t>(e.mtime),static_cast<unsigned>(e.permissions),S_ISDIR(e.permissions),S_ISLNK(e.permissions),S_ISREG(e.permissions)});}}
   else if(complete&&j.kind==JobKind::Operation){operation_result(s.id,true,j.path,t.error);}

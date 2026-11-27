@@ -71,6 +71,7 @@ inline bool transfer_active(TransferState state) {
 struct TransferTask {
     std::uint64_t id{}, session_id{}, completed_bytes{}, total_bytes{};
     std::string source, destination, error; bool upload = true;
+    bool overwrite = false, conflict = false;
     TransferState state = TransferState::Queued;
     bool cancel_requested = false;
 };
@@ -125,9 +126,10 @@ struct WorkspaceCallbacks {
     std::function<void(ConnectRequest)> connect_saved;
     std::function<void(std::int64_t, RememberPolicy)> save_connection_settings;
     std::function<void(std::uint64_t, bool remote, std::string path)> file_list;
-    // Source/destination are full paths; never overwrite an existing destination.
+    // Source/destination are full paths; default callback never overwrites an existing destination.
     // Returns false for requests not added to the queue (including duplicates).
     std::function<bool(std::uint64_t, bool upload, std::string source, std::string destination)> file_transfer;
+    std::function<bool(std::uint64_t, bool upload, std::string source, std::string destination, bool overwrite)> file_transfer_ex;
     std::function<void(std::uint64_t)> file_cancel;
     std::function<void(std::uint64_t)> file_clear_completed;
     std::function<void(FileOperationRequest)> file_operation;

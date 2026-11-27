@@ -265,7 +265,7 @@ struct SshSession::Impl {
         std::string temp;
         std::string buffer;
         std::size_t offset{};
-        bool finishing{}, published{}, temp_created{}, pending_call{};
+        bool finishing{}, published{}, temp_created{}, pending_call{}, dest_checked{};
     };
     std::optional<Job> active;
 #ifndef _WIN32
@@ -977,6 +977,17 @@ struct SshSession::Impl {
                     j.local_name = app::utf8_path(local.filename());
                     if (!app::valid_file_leaf(j.local_name,true))
                         fail(ErrorCode::Protocol, "下载路径包含有歧义的组成部分");
+                    const auto existing_path = parent / app::native_file_path(j.local_name);
+                    const DWORD existing_attr = ::GetFileAttributesW(existing_path.c_str());
+                    if (existing_attr != INVALID_FILE_ATTRIBUTES) {
+                        if (!r.overwrite) j.result.conflict = true;
+                        if (existing_attr & FILE_ATTRIBUTE_DIRECTORY)
+                            fail(ErrorCode::Protocol, "本地同名目标为目录，无法覆盖");
+                        if (existing_attr & FILE_ATTRIBUTE_REPARSE_POINT)
+                            fail(ErrorCode::Protocol, "本地同名目标为重解析点，拒绝覆盖");
+                        if (!r.overwrite)
+                            fail(ErrorCode::Protocol, "本地目标文件已存在");
+                    }
                     unsigned char random[16];
                     if (!fill_random(random, sizeof(random))) fail(ErrorCode::Internal, "无法生成下载临时文件名");
                     j.temp = ".jianssh-";
@@ -1010,6 +1021,18 @@ struct SshSession::Impl {
                     if (::fstat(j.dirfd, &directory) || directory.st_uid != ::geteuid() ||
                         (directory.st_mode & (S_IWGRP | S_IWOTH)))
                         fail(ErrorCode::Protocol, "下载目录必须属于当前用户，且组和其他用户不可写");
+                    struct stat existing{};
+                    if (::fstatat(j.dirfd, j.local_name.c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0) {
+                        if (!r.overwrite) j.result.conflict = true;
+                        if (S_ISDIR(existing.st_mode))
+                            fail(ErrorCode::Protocol, "本地同名目标为目录，无法覆盖");
+                        if (!S_ISREG(existing.st_mode))
+                            fail(ErrorCode::Protocol, "本地同名目标不是普通文件，无法覆盖");
+                        if (!r.overwrite)
+                            fail(ErrorCode::Protocol, "本地目标文件已存在");
+                    } else if (errno != ENOENT) {
+                        fail(ErrorCode::Protocol, "检查本地目标文件失败", errno);
+                    }
                     unsigned char random[16];
                     if (!fill_random(random, sizeof(random))) fail(ErrorCode::Internal, "无法生成下载临时文件名");
                     j.temp = ".jianssh-";
@@ -1031,6 +1054,27 @@ struct SshSession::Impl {
                 j.phase = 1; return true;
             }
             if (j.phase == 1) {
+                if (upload && !j.dest_checked) {
+                    LIBSSH2_SFTP_ATTRIBUTES dest{};
+                    int rc = libssh2_sftp_lstat(sftp, r.remote_path.c_str(), &dest);
+                    if (rc == LIBSSH2_ERROR_EAGAIN) return false;
+                    if (rc == 0) {
+                        if (!r.overwrite) j.result.conflict = true;
+                        if ((dest.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) && LIBSSH2_SFTP_S_ISDIR(dest.permissions))
+                            fail(ErrorCode::Protocol, "远端同名目标为目录，无法覆盖");
+                        if ((dest.flags & LIBSSH2_SFTP_ATTR_PERMISSIONS) && !LIBSSH2_SFTP_S_ISREG(dest.permissions))
+                            fail(ErrorCode::Protocol, "远端同名目标不是普通文件，无法覆盖");
+                        if (!r.overwrite)
+                            fail(ErrorCode::Protocol, "远端目标文件已存在");
+                    } else {
+                        const auto status = libssh2_sftp_last_error(sftp);
+                        if (rc != LIBSSH2_ERROR_SFTP_PROTOCOL ||
+                            (status != LIBSSH2_FX_NO_SUCH_FILE && status != LIBSSH2_FX_OP_UNSUPPORTED))
+                            task_rc(rc, "检查远端目标文件");
+                    }
+                    j.dest_checked = true;
+                    return true;
+                }
                 j.handle = libssh2_sftp_open(sftp, upload ? j.temp.c_str() : r.remote_path.c_str(),
                     upload ? LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL : LIBSSH2_FXF_READ, 0600);
                 if (!j.handle) { task_rc(libssh2_session_last_errno(session), "打开传输文件"); return false; }
@@ -1125,7 +1169,12 @@ struct SshSession::Impl {
                 int rc = r.overwrite ? libssh2_sftp_posix_rename(sftp, j.temp.c_str(), r.remote_path.c_str()) :
                     libssh2_sftp_rename_ex(sftp, j.temp.data(), static_cast<unsigned>(j.temp.size()),
                         r.remote_path.data(), static_cast<unsigned>(r.remote_path.size()), 0);
-                if (!task_rc(rc, "发布上传文件（不提供不安全的覆盖回退）")) return false;
+                if (rc == LIBSSH2_ERROR_EAGAIN) return false;
+                if (rc < 0 && !r.overwrite && rc == LIBSSH2_ERROR_SFTP_PROTOCOL &&
+                    libssh2_sftp_last_error(sftp) == LIBSSH2_FX_FILE_ALREADY_EXISTS) {
+                    j.result.conflict = true;
+                }
+                if (!task_rc(rc, r.overwrite ? "覆盖远端文件（需服务器支持 posix-rename）" : "发布上传文件（不提供不安全的覆盖回退）")) return false;
             } else {
 #ifdef _WIN32
                 struct _stat64 held{};
@@ -1142,8 +1191,12 @@ struct SshSession::Impl {
                 rename->FileNameLength=static_cast<DWORD>(bytes);
                 std::memcpy(storage.get()+offsetof(FILE_RENAME_INFO,FileName),name.data(),bytes);
                 const HANDLE pinned=reinterpret_cast<HANDLE>(::_get_osfhandle(j.fd));
-                if (!::SetFileInformationByHandle(pinned,FileRenameInfo,rename,static_cast<DWORD>(length)))
-                    fail(ErrorCode::Protocol, "下载目标冲突或发布失败", static_cast<int>(::GetLastError()));
+                if (!::SetFileInformationByHandle(pinned,FileRenameInfo,rename,static_cast<DWORD>(length))) {
+                    const DWORD err = ::GetLastError();
+                    if (!r.overwrite && (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS))
+                        j.result.conflict = true;
+                    fail(ErrorCode::Protocol, "下载目标冲突或发布失败", static_cast<int>(err));
+                }
                 j.published = true;
 #else
                 struct stat held{}, named{}, directory{};
@@ -1154,9 +1207,17 @@ struct SshSession::Impl {
                     !S_ISREG(named.st_mode) || named.st_dev != held.st_dev || named.st_ino != held.st_ino ||
                     named.st_size != held.st_size || static_cast<std::uint64_t>(held.st_size) != j.result.total)
                     fail(ErrorCode::Protocol, "发布前下载临时文件被替换或修改");
+                if (r.overwrite) {
+                    struct stat existing{};
+                    if (::fstatat(j.dirfd, j.local_name.c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0 && !S_ISREG(existing.st_mode))
+                        fail(ErrorCode::Protocol, S_ISDIR(existing.st_mode) ? "本地同名目标为目录，无法覆盖" : "本地同名目标不是普通文件，无法覆盖");
+                }
                 int rc = r.overwrite ? ::renameat(j.dirfd, j.temp.c_str(), j.dirfd, j.local_name.c_str()) :
                     ::linkat(j.dirfd, j.temp.c_str(), j.dirfd, j.local_name.c_str(), 0);
-                if (rc) fail(ErrorCode::Protocol, "下载目标冲突或发布失败", errno);
+                if (rc) {
+                    if (!r.overwrite && errno == EEXIST) j.result.conflict = true;
+                    fail(ErrorCode::Protocol, "下载目标冲突或发布失败", errno);
+                }
                 if (!r.overwrite) ::unlinkat(j.dirfd, j.temp.c_str(), 0);
                 j.published = true;
                 if (::fsync(j.dirfd)) fail(ErrorCode::Protocol, "下载已发布，但目录同步失败", errno);

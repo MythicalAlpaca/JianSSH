@@ -21,9 +21,11 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -89,6 +91,24 @@ struct Workspace::Impl {
     app::FileOperationRequest operation;
     bool operation_pending=false;
     std::array<char,16> permissions{};
+    struct PendingConflict {
+        std::uint64_t session_id{};
+        bool upload=false;
+        std::string source_path, target_dir, conflict_name;
+        bool has_source_meta=false;
+        std::uint64_t source_size{};
+        std::int64_t source_mtime{};
+        bool has_target_meta=false;
+        std::uint64_t target_size{};
+        std::int64_t target_mtime{};
+        bool target_non_regular=false;
+    };
+    std::deque<PendingConflict> pending_conflicts;
+    std::size_t conflict_batch_total=0;
+    bool conflict_pending=false;
+    bool conflict_apply_all=false;
+    std::array<char,4097> conflict_save_as{};
+    std::unordered_set<std::uint64_t> prompted_conflict_transfers;
     void clear_connection_secret() { wipe(password.data(),password.size()); show_password=false; }
     void prepare_connection(const store::Host& h,const app::WorkspaceModel& m) {
         prepare(h); remember=0;save_to_workspace=false;has_saved_password=false;
@@ -869,6 +889,18 @@ struct Workspace::Impl {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.f,(avail-width*count-gap)*0.5f));
         return width;
     }
+    float confirmation_buttons_3(const char* first,const char* second,const char* third) const {
+        ImGui::PushStyleColor(ImGuiCol_Separator,tone(fade_color(theme.separator,0.65f)));
+        ImGui::Separator();
+        ImGui::PopStyleColor();
+        const float avail=ImGui::GetContentRegionAvail().x;
+        const float gap=layout.confirm_footer_gap;
+        const float text_width=std::max({ImGui::CalcTextSize(first).x,ImGui::CalcTextSize(second).x,ImGui::CalcTextSize(third).x});
+        const float preferred=std::max(layout.confirm_button_min,text_width+ImGui::GetStyle().FramePadding.x*2.f);
+        const float width=std::max(1.f,std::min(preferred,(avail-gap*2.f)/3.f));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX()+std::max(0.f,(avail-width*3.f-gap*2.f)*0.5f));
+        return width;
+    }
     void confirmation_note(const char* text,ImU32 color) const {
         ImGui::PushStyleColor(ImGuiCol_Text,tone(color));
         ImGui::TextWrapped("%s",text);
@@ -1049,7 +1081,7 @@ struct Workspace::Impl {
                 return s.id==key.first&&s.password_request_id==key.second;
             });
         });
-        if(!operation_pending&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopup)) {
+        if(!operation_pending&&!conflict_pending&&!ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopup)) {
             if(m.trust && (trust_id!=m.trust->request_id||trust_session!=m.trust->session_id)) {
                 trust_id=m.trust->request_id;trust_session=m.trust->session_id;
                 ImGui::OpenPopup("验证服务器身份");begin_modal();
@@ -1335,24 +1367,293 @@ struct Workspace::Impl {
         if(!ImGui::IsPopupOpen("连接到服务器"))clear_connection_secret();
         if(!ImGui::IsPopupOpen("连接到服务器")&&!ImGui::IsPopupOpen("设备资料"))discard_key_task();
     }
+    static std::string file_size(std::uint64_t value) {
+        if(value<1024)return std::to_string(value)+" B";
+        double size=static_cast<double>(value);
+        const char* units[]={"B","KiB","MiB","GiB","TiB","PiB","EiB"};
+        int unit=0;
+        while(size>=1024&&unit<6){size/=1024;++unit;}
+        char text[48];std::snprintf(text,sizeof(text),"%.1f %s",size,units[unit]);return text;
+    }
+    static std::string file_time(std::int64_t value) {
+        if(!value)return "—";
+        const auto t=static_cast<std::time_t>(value);
+        char out[32];const auto* tm=std::localtime(&t);
+        return tm&&std::strftime(out,sizeof(out),"%Y-%m-%d %H:%M",tm)?out:"—";
+    }
+    static std::string fold_ascii(std::string text) {
+        for(char& c:text)if(c>='A'&&c<='Z')c+=('a'-'A');
+        return text;
+    }
+    static std::string show_filename(std::string text) {
+        for(char& c:text)if(static_cast<unsigned char>(c)<32||c==127)c='?';
+        return text;
+    }
+    static std::string file_leaf(const std::string& path,bool remote) {
+        const auto pos=app::windows_file_path(remote)?path.find_last_of("\\/"):path.rfind('/');
+        return pos==std::string::npos?path:path.substr(pos+1);
+    }
+    static bool same_leaf_name(std::string_view a,std::string_view b,bool remote) {
+        if(app::windows_file_path(remote)) return fold_ascii(std::string(a))==fold_ascii(std::string(b));
+        return a==b;
+    }
+    static std::string truncate_utf8_bytes(std::string_view text,std::size_t max_bytes) {
+        if(text.size()<=max_bytes) return std::string(text);
+        std::size_t n=max_bytes;
+        while(n>0&&(static_cast<unsigned char>(text[n])&0xC0u)==0x80u) --n;
+        return std::string(text.substr(0,n));
+    }
+    static const app::FilePane* find_pane(const app::WorkspaceModel& m,std::uint64_t session_id,bool remote) {
+        for(const auto& p:m.file_panes)if(p.session_id==session_id&&p.remote==remote)return &p;
+        return nullptr;
+    }
+    static const app::FileEntry* find_entry(const app::FilePane* pane,std::string_view name,bool remote) {
+        if(!pane)return nullptr;
+        for(const auto& e:pane->entries)if(same_leaf_name(e.name,name,remote))return &e;
+        return nullptr;
+    }
+    static bool has_active_transfer(const app::WorkspaceModel& m,std::uint64_t session_id,bool upload,const std::string& dest) {
+        return std::any_of(m.transfers.begin(),m.transfers.end(),[&](const auto& t){
+            return t.session_id==session_id&&t.upload==upload&&app::transfer_active(t.state)&&t.destination==dest;
+        });
+    }
+    static bool has_unlisted_completed_transfer(const app::WorkspaceModel& m,const app::FilePane* target_pane,
+                                                std::uint64_t session_id,bool target_remote,
+                                                const std::string& target_dir,const std::string& dest) {
+        if(target_pane&&!target_pane->loading&&target_pane->path==target_dir) return false;
+        return std::any_of(m.transfers.begin(),m.transfers.end(),[&](const auto& t){
+            return t.session_id==session_id&&t.upload==target_remote&&
+                   t.state==app::TransferState::Completed&&t.destination==dest;
+        });
+    }
+    static bool is_candidate_name_taken(std::uint64_t session_id,bool target_remote,const std::string& target_dir,
+                                        std::string_view candidate_name,const app::WorkspaceModel& m,
+                                        const std::set<std::string>& extra_reserved) {
+        for(const auto& r:extra_reserved)if(same_leaf_name(r,candidate_name,target_remote))return true;
+        const auto* target_pane=find_pane(m,session_id,target_remote);
+        if(target_pane&&!target_pane->path.empty()&&target_pane->path==target_dir&&
+           find_entry(target_pane,candidate_name,target_remote)!=nullptr) return true;
+        const std::string dest=app::file_child(target_dir,std::string(candidate_name),target_remote);
+        if(has_active_transfer(m,session_id,target_remote,dest)) return true;
+        if(has_unlisted_completed_transfer(m,target_pane,session_id,target_remote,target_dir,dest)) return true;
+        return false;
+    }
+    static std::string suggest_unique_name(std::uint64_t session_id,bool target_remote,const std::string& target_dir,
+                                           const std::string& original_name,const app::WorkspaceModel& m,
+                                           const std::set<std::string>& extra_reserved={}) {
+        std::string stem=original_name,ext;
+        const std::string lower=fold_ascii(original_name);
+        static constexpr const char* kCompoundExts[]={".tar.gz",".tar.xz",".tar.bz2",".tar.zst",".tar.lz4"};
+        bool split_done=false;
+        for(const char* ce:kCompoundExts) {
+            const std::size_t ce_len=std::strlen(ce);
+            if(original_name.size()>ce_len&&lower.compare(lower.size()-ce_len,ce_len,ce)==0) {
+                stem=original_name.substr(0,original_name.size()-ce_len);
+                ext=original_name.substr(original_name.size()-ce_len);
+                split_done=true;
+                break;
+            }
+        }
+        if(!split_done) {
+            const auto dot=original_name.rfind('.');
+            if(dot!=std::string::npos&&dot>0&&dot+1<original_name.size()) {
+                stem=original_name.substr(0,dot);
+                ext=original_name.substr(dot);
+            }
+        }
+        // Strip an existing " (<digits>)" suffix so repeated saves increment cleanly.
+        if(stem.size()>=4&&stem.back()==')') {
+            const auto open=stem.rfind(" (");
+            if(open!=std::string::npos&&open>0&&open+2<stem.size()-1) {
+                bool digits=true;
+                for(std::size_t i=open+2;i+1<stem.size();++i)
+                    if(stem[i]<'0'||stem[i]>'9'){digits=false;break;}
+                if(digits) stem.erase(open);
+            }
+        }
+        const bool win=app::windows_file_path(target_remote);
+        constexpr std::size_t kMaxLeafBytes=255;
+        for(unsigned idx=1;idx<=9999;++idx) {
+            const std::string suffix=" ("+std::to_string(idx)+")"+ext;
+            const std::size_t budget=suffix.size()<kMaxLeafBytes?kMaxLeafBytes-suffix.size():0;
+            std::string base=truncate_utf8_bytes(stem,budget);
+            if(base.empty()&&budget>=1) base="file";
+            std::string candidate=base+suffix;
+            if(app::valid_file_leaf(candidate,win)&&
+               !same_leaf_name(candidate,original_name,target_remote)&&
+               !is_candidate_name_taken(session_id,target_remote,target_dir,candidate,m,extra_reserved)) {
+                return candidate;
+            }
+        }
+        return stem+" (1)"+ext;
+    }
+    static bool submit_transfer(const app::WorkspaceCallbacks& cb,std::uint64_t session_id,bool upload,
+                                std::string source,std::string destination,bool overwrite) {
+        if(cb.file_transfer_ex) return cb.file_transfer_ex(session_id,upload,std::move(source),std::move(destination),overwrite);
+        if(!overwrite&&cb.file_transfer) return cb.file_transfer(session_id,upload,std::move(source),std::move(destination));
+        return false;
+    }
+    void refresh_conflict_meta(PendingConflict& c,const app::WorkspaceModel& m) {
+        if(!c.has_source_meta) {
+            const auto* sp=find_pane(m,c.session_id,!c.upload);
+            const std::string src_dir=app::file_parent(c.source_path,!c.upload);
+            if(sp&&sp->path==src_dir) {
+                if(const auto* se=find_entry(sp,file_leaf(c.source_path,!c.upload),!c.upload);se&&se->regular) {
+                    c.has_source_meta=true;c.source_size=se->size;c.source_mtime=se->mtime;
+                }
+            }
+        }
+        const auto* dp=find_pane(m,c.session_id,c.upload);
+        if(dp&&dp->path==c.target_dir) {
+            if(const auto* de=find_entry(dp,c.conflict_name,c.upload)) {
+                c.target_non_regular=!de->regular;
+                if(de->regular){c.has_target_meta=true;c.target_size=de->size;c.target_mtime=de->mtime;}
+            }
+        }
+    }
+    void prepare_front_conflict(const app::WorkspaceModel& m,const std::set<std::string>& extra_reserved={}) {
+        if(pending_conflicts.empty()) return;
+        auto& front=pending_conflicts.front();
+        refresh_conflict_meta(front,m);
+        copy(conflict_save_as,suggest_unique_name(front.session_id,front.upload,front.target_dir,front.conflict_name,m,extra_reserved));
+    }
+    void enqueue_conflict(PendingConflict c,const app::WorkspaceModel& m) {
+        const bool dup=std::any_of(pending_conflicts.begin(),pending_conflicts.end(),[&](const auto& item){
+            return item.session_id==c.session_id&&item.upload==c.upload&&item.source_path==c.source_path&&
+                   item.target_dir==c.target_dir&&same_leaf_name(item.conflict_name,c.conflict_name,c.upload);
+        });
+        if(dup) return;
+        const bool was_empty=pending_conflicts.empty();
+        refresh_conflict_meta(c,m);
+        pending_conflicts.push_back(std::move(c));
+        if(was_empty) {
+            conflict_batch_total=1;
+            conflict_apply_all=false;
+            prepare_front_conflict(m);
+            conflict_pending=true;
+        } else {
+            ++conflict_batch_total;
+            if(!ImGui::IsPopupOpen("目标文件已存在")) conflict_pending=true;
+        }
+    }
+    PendingConflict conflict_from_task(const app::TransferTask& t,const app::WorkspaceModel& m) {
+        PendingConflict c;
+        c.session_id=t.session_id;
+        c.upload=t.upload;
+        c.source_path=t.source;
+        c.target_dir=app::file_parent(t.destination,t.upload);
+        c.conflict_name=file_leaf(t.destination,t.upload);
+        c.target_non_regular=t.error.find("目录")!=std::string::npos||
+                             t.error.find("不是普通文件")!=std::string::npos||
+                             t.error.find("重解析点")!=std::string::npos;
+        refresh_conflict_meta(c,m);
+        return c;
+    }
+    void watch_transfer_conflicts(const app::WorkspaceModel& m) {
+        std::erase_if(prompted_conflict_transfers,[&](std::uint64_t id){
+            return std::none_of(m.transfers.begin(),m.transfers.end(),[id](const auto& t){return t.id==id;});
+        });
+        const bool had_front=!pending_conflicts.empty();
+        const std::string prev_src=had_front?pending_conflicts.front().source_path:std::string{};
+        std::erase_if(pending_conflicts,[&](const PendingConflict& c){
+            return std::none_of(m.sessions.begin(),m.sessions.end(),[&](const auto& s){return s.id==c.session_id&&s.connected;});
+        });
+        if(pending_conflicts.empty()) {
+            conflict_batch_total=0;
+            conflict_apply_all=false;
+            conflict_pending=false;
+        } else if(had_front&&pending_conflicts.front().source_path!=prev_src) {
+            prepare_front_conflict(m);
+        }
+        for(const auto& t:m.transfers) {
+            if(t.state!=app::TransferState::Failed||!t.conflict) continue;
+            if(prompted_conflict_transfers.contains(t.id)) continue;
+            prompted_conflict_transfers.insert(t.id);
+            const bool session_ok=std::any_of(m.sessions.begin(),m.sessions.end(),[&](const auto& s){return s.id==t.session_id&&s.connected;});
+            if(session_ok) enqueue_conflict(conflict_from_task(t,m),m);
+        }
+    }
+    void set_session_transfer_feedback(std::uint64_t session_id,bool upload,std::string message) {
+        if(auto it=browsers.find(session_id);it!=browsers.end())
+            it->second.panes[upload?0:1].transfer_feedback=std::move(message);
+    }
+    void request_transfers(std::uint64_t session_id,bool upload,const std::string& source_dir,
+                           const std::string& target_dir,const std::vector<std::string>& names,
+                           BrowserPane& b,const app::WorkspaceModel& m,const app::WorkspaceCallbacks& cb) {
+        if(names.empty()) return;
+        const bool source_remote=!upload;
+        const bool target_remote=upload;
+        const auto* src_pane=find_pane(m,session_id,source_remote);
+        const auto* dst_pane=find_pane(m,session_id,target_remote);
+        const bool dst_listed=dst_pane&&!dst_pane->loading&&dst_pane->path==target_dir;
+        int added=0,conflicts=0,rejected=0;
+        for(const auto& name:names) {
+            const std::string src_path=app::file_child(source_dir,name,source_remote);
+            const std::string dst_path=app::file_child(target_dir,name,target_remote);
+            if(has_active_transfer(m,session_id,upload,dst_path)) {
+                ++rejected;
+                continue;
+            }
+            const app::FileEntry* dst_entry=dst_listed?find_entry(dst_pane,name,target_remote):nullptr;
+            const bool exists=dst_entry!=nullptr||
+                              has_unlisted_completed_transfer(m,dst_pane,session_id,target_remote,target_dir,dst_path);
+            if(exists) {
+                PendingConflict pc;
+                pc.session_id=session_id;
+                pc.upload=upload;
+                pc.source_path=src_path;
+                pc.target_dir=target_dir;
+                pc.conflict_name=dst_entry?dst_entry->name:name;
+                if(src_pane&&src_pane->path==source_dir) {
+                    if(const auto* se=find_entry(src_pane,name,source_remote);se&&se->regular) {
+                        pc.has_source_meta=true;pc.source_size=se->size;pc.source_mtime=se->mtime;
+                    }
+                }
+                if(dst_entry) {
+                    pc.target_non_regular=!dst_entry->regular;
+                    if(dst_entry->regular){pc.has_target_meta=true;pc.target_size=dst_entry->size;pc.target_mtime=dst_entry->mtime;}
+                }
+                enqueue_conflict(std::move(pc),m);
+                ++conflicts;
+            } else if(submit_transfer(cb,session_id,upload,src_path,dst_path,false)) {
+                ++added;
+            } else {
+                ++rejected;
+            }
+        }
+        if(names.size()==1) {
+            if(conflicts) b.transfer_feedback="目标已存在同名文件，请选择覆盖或另存为";
+            else if(added) b.transfer_feedback="已加入传输队列";
+            else b.transfer_feedback="未加入队列：可能已在队列中或队列已满";
+        } else {
+            b.transfer_feedback="已入队 "+std::to_string(added)+" / "+std::to_string(names.size())+" 个文件";
+            if(conflicts) b.transfer_feedback+="（"+std::to_string(conflicts)+" 个同名待确认）";
+            if(rejected) b.transfer_feedback+="（"+std::to_string(rejected)+" 个重复或已满）";
+        }
+    }
     struct DraggedFile {
         std::uint64_t session{}; bool remote=false;
         std::string name, dir;
     } dragged_file;
-    void file_drop_target(std::uint64_t session,bool target_remote,const std::string& target_dir,BrowserPane& b,const app::WorkspaceCallbacks& cb) {
+    void file_drop_target(std::uint64_t session,bool target_remote,const std::string& target_dir,BrowserPane& b,
+                          const app::WorkspaceModel& m,const app::WorkspaceCallbacks& cb) {
         if(!ImGui::BeginDragDropTarget())return;
         const auto& drag=dragged_file;
-        if(drag.session==session&&drag.remote!=target_remote&&cb.file_transfer&&
+        if(drag.session==session&&drag.remote!=target_remote&&(cb.file_transfer_ex||cb.file_transfer)&&
            app::valid_file_leaf(drag.name,app::windows_file_path(target_remote))) {
             if(const auto* payload=ImGui::AcceptDragDropPayload("JIANSSH_FILE");payload&&payload->IsDelivery())
-                b.transfer_feedback=cb.file_transfer(session,!drag.remote,app::file_child(drag.dir,drag.name,drag.remote),app::file_child(target_dir,drag.name,target_remote))?"已加入传输队列":"未加入队列：可能已在队列中或队列已满";
+                request_transfers(session,!drag.remote,drag.dir,target_dir,{drag.name},b,m,cb);
         }
         ImGui::EndDragDropTarget();
     }
     void feature_dialogs(const app::WorkspaceModel& m,const app::WorkspaceCallbacks& cb) {
         if(operation_pending){operation_pending=false;ImGui::OpenPopup("确认文件操作");begin_modal();}
+        else if(conflict_pending&&!pending_conflicts.empty()&&!ImGui::IsPopupOpen("确认文件操作")){
+            conflict_pending=false;ImGui::OpenPopup("目标文件已存在");begin_modal();
+        }
         const float mp=modal_progress();
         const float a=std::clamp(mp,0.f,1.f);
+        constexpr ImGuiWindowFlags kConfirmFlags=ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,layout.popup_rounding);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,0.f);
         ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize,0.f);
@@ -1362,7 +1663,7 @@ struct Workspace::Impl {
         const char* delete_file_note="永久删除选中的文件或链接，不能撤销。";
         const std::string path_text=std::string(operation.remote?"远端：":"本地：")+operation.path;
         constrain_confirmation(std::max(ImGui::CalcTextSize(path_text.c_str()).x,deleting?ImGui::CalcTextSize(delete_file_note).x:285.f),layout.modal_width_operation,mp);
-        if(ImGui::BeginPopupModal("确认文件操作",nullptr,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoTitleBar)) {
+        if(ImGui::BeginPopupModal("确认文件操作",nullptr,kConfirmFlags)) {
             clamp_modal_to_viewport();
             if(modal_sheet_header("确认文件操作")) ImGui::CloseCurrentPopup();
             begin_confirmation_body();
@@ -1390,29 +1691,150 @@ struct Workspace::Impl {
             }
             ImGui::EndDisabled();ImGui::SameLine(0,layout.confirm_footer_gap);if(button("取消",ImVec2(footer,layout.button_height),"取消操作"))ImGui::CloseCurrentPopup();ImGui::EndPopup();
         }
+        const float conflict_desired=pending_conflicts.empty()?360.f:430.f;
+        constrain_confirmation(conflict_desired,layout.modal_width_conflict,mp);
+        if(ImGui::BeginPopupModal("目标文件已存在",nullptr,kConfirmFlags)) {
+            if(pending_conflicts.empty()) {
+                ImGui::CloseCurrentPopup();
+                dialog_followup=true;
+            } else {
+                clamp_modal_to_viewport();
+                const bool cancel_header=modal_sheet_header("目标文件已存在");
+                auto& cur=pending_conflicts.front();
+                refresh_conflict_meta(cur,m);
+                const bool session_ok=std::any_of(m.sessions.begin(),m.sessions.end(),[&](const auto& s){
+                    return s.id==cur.session_id&&s.connected;
+                });
+                const std::string full_target=app::file_child(cur.target_dir,cur.conflict_name,cur.upload);
+                begin_confirmation_body();
+                if(conflict_batch_total>1&&conflict_batch_total>=pending_conflicts.size()) {
+                    const std::size_t idx=conflict_batch_total-pending_conflicts.size()+1;
+                    ImGui::TextColored(tone(theme.dark?theme.accent_hover:theme.accent),"%s冲突 · 第 %zu / %zu 项",
+                                       cur.upload?"推送文件（上传）":"获取文件（下载）",idx,conflict_batch_total);
+                } else {
+                    ImGui::TextColored(tone(theme.dark?theme.accent_hover:theme.accent),"%s时检测到同名目标",
+                                       cur.upload?"推送文件（上传）":"获取文件（下载）");
+                }
+                const std::string target_line=std::string(cur.upload?"远端目标：":"本地目标：")+show_filename(full_target);
+                confirmation_note(target_line.c_str(),theme.muted);
+                const std::string src_info=cur.has_source_meta?(file_size(cur.source_size)+" · "+file_time(cur.source_mtime)):"待传输普通文件";
+                const std::string dst_info=cur.target_non_regular?"同名目录或特殊文件（不可覆盖）"
+                                                                  :(cur.has_target_meta?(file_size(cur.target_size)+" · "+file_time(cur.target_mtime)):"已存在同名文件");
+                ImGui::TextWrapped("源文件：%s",src_info.c_str());
+                ImGui::TextWrapped("现有项：%s",dst_info.c_str());
+                ImGui::Spacing();
+                label("另存为文件名（保存在同一目标目录）");
+                begin_frame_widget("冲突另存名称");
+                ImGui::SetNextItemWidth(-1.f);
+                const bool enter_save_as=ImGui::InputTextWithHint("##冲突另存名称","输入新的文件名称",
+                    conflict_save_as.data(),conflict_save_as.size(),ImGuiInputTextFlags_EnterReturnsTrue);
+                end_frame_widget("冲突另存名称");
+                const std::string save_as_name=conflict_save_as.data();
+                const bool leaf_ok=app::valid_file_leaf(save_as_name,app::windows_file_path(cur.upload));
+                const bool same_as_conflict=leaf_ok&&same_leaf_name(save_as_name,cur.conflict_name,cur.upload);
+                const bool save_as_taken=leaf_ok&&!same_as_conflict&&
+                    is_candidate_name_taken(cur.session_id,cur.upload,cur.target_dir,save_as_name,m,{});
+                const bool can_save_as=session_ok&&leaf_ok&&!same_as_conflict&&!save_as_taken&&(cb.file_transfer_ex||cb.file_transfer);
+                const bool overwrite_busy=has_active_transfer(m,cur.session_id,cur.upload,full_target);
+                const bool can_overwrite=session_ok&&!cur.target_non_regular&&!overwrite_busy&&cb.file_transfer_ex!=nullptr;
+                if(!session_ok) confirmation_note("原会话已关闭或连接已断开。",theme.warning);
+                else if(cur.target_non_regular) confirmation_note("目标是目录或非常规文件，不支持覆盖，请使用「另存为」。",theme.warning);
+                else if(!leaf_ok&&!save_as_name.empty()) confirmation_note("另存名称无效：请输入单个合法文件名（不含路径分隔符）。",theme.warning);
+                else if(same_as_conflict) confirmation_note("另存名称与原冲突文件名相同；如需替换现有文件请点击「覆盖」。",theme.warning);
+                else if(save_as_taken) confirmation_note("该名称在目标目录或传输队列中已存在，请换用其他名称。",theme.warning);
+                else confirmation_note("覆盖将通过临时文件校验后原子替换目标；另存为将保留现有文件。",theme.muted);
+                if(pending_conflicts.size()>1) {
+                    checkbox("对本次其余冲突文件执行相同操作（另存时自动编号）",&conflict_apply_all,"冲突批量应用");
+                }
+                end_modal_body();
+                const char* skip_label=pending_conflicts.size()>1?"跳过":"取消";
+                const float btn_w=confirmation_buttons_3("另存为","覆盖",skip_label);
+                ImGui::BeginDisabled(!can_save_as);
+                const bool do_save_as=button("另存为",ImVec2(btn_w,layout.button_height),"冲突另存为",ButtonKind::Primary)||(enter_save_as&&can_save_as);
+                ImGui::EndDisabled();
+                ImGui::SameLine(0,layout.confirm_footer_gap);
+                ImGui::BeginDisabled(!can_overwrite);
+                const bool do_overwrite=button("覆盖",ImVec2(btn_w,layout.button_height),"冲突覆盖",ButtonKind::Danger);
+                ImGui::EndDisabled();
+                ImGui::SameLine(0,layout.confirm_footer_gap);
+                const bool do_skip=button(skip_label,ImVec2(btn_w,layout.button_height),"冲突跳过");
+                const bool abort_all=cancel_header||ImGui::IsKeyPressed(ImGuiKey_Escape,false);
+                if(abort_all) {
+                    set_session_transfer_feedback(cur.session_id,cur.upload,"已取消同名冲突处理");
+                    pending_conflicts.clear();
+                    conflict_batch_total=0;
+                    conflict_apply_all=false;
+                    ImGui::CloseCurrentPopup();
+                    dialog_followup=true;
+                } else if(do_save_as) {
+                    const std::uint64_t sid=cur.session_id;
+                    const bool up=cur.upload;
+                    std::set<std::string> reserved{save_as_name};
+                    int queued=submit_transfer(cb,cur.session_id,cur.upload,cur.source_path,
+                                               app::file_child(cur.target_dir,save_as_name,cur.upload),false)?1:0;
+                    pending_conflicts.pop_front();
+                    if(conflict_apply_all) {
+                        while(!pending_conflicts.empty()) {
+                            auto next=std::move(pending_conflicts.front());
+                            pending_conflicts.pop_front();
+                            const std::string auto_name=suggest_unique_name(next.session_id,next.upload,next.target_dir,next.conflict_name,m,reserved);
+                            reserved.insert(auto_name);
+                            if(submit_transfer(cb,next.session_id,next.upload,next.source_path,
+                                               app::file_child(next.target_dir,auto_name,next.upload),false))
+                                ++queued;
+                        }
+                    }
+                    set_session_transfer_feedback(sid,up,queued>1?("已另存 "+std::to_string(queued)+" 个文件并加入队列")
+                                                                 :(queued?"已另存为「"+show_filename(save_as_name)+"」并加入队列":"未加入队列：可能队列已满"));
+                    if(pending_conflicts.empty()) {
+                        conflict_batch_total=0;conflict_apply_all=false;ImGui::CloseCurrentPopup();dialog_followup=true;
+                    } else {
+                        prepare_front_conflict(m,reserved);
+                    }
+                } else if(do_overwrite) {
+                    const std::uint64_t sid=cur.session_id;
+                    const bool up=cur.upload;
+                    const std::string cname=cur.conflict_name;
+                    int queued=submit_transfer(cb,cur.session_id,cur.upload,cur.source_path,full_target,true)?1:0;
+                    pending_conflicts.pop_front();
+                    if(conflict_apply_all) {
+                        std::deque<PendingConflict> kept;
+                        while(!pending_conflicts.empty()) {
+                            auto next=std::move(pending_conflicts.front());
+                            pending_conflicts.pop_front();
+                            const std::string next_dest=app::file_child(next.target_dir,next.conflict_name,next.upload);
+                            if(next.target_non_regular||has_active_transfer(m,next.session_id,next.upload,next_dest)) {
+                                kept.push_back(std::move(next));
+                            } else if(submit_transfer(cb,next.session_id,next.upload,next.source_path,next_dest,true)) {
+                                ++queued;
+                            }
+                        }
+                        pending_conflicts=std::move(kept);
+                    }
+                    set_session_transfer_feedback(sid,up,queued>1?("已确认覆盖 "+std::to_string(queued)+" 个文件并加入队列")
+                                                                 :(queued?"已确认覆盖「"+show_filename(cname)+"」并加入队列":"未加入队列：可能队列已满"));
+                    if(pending_conflicts.empty()) {
+                        conflict_batch_total=0;conflict_apply_all=false;ImGui::CloseCurrentPopup();dialog_followup=true;
+                    } else {
+                        conflict_apply_all=false;
+                        prepare_front_conflict(m);
+                    }
+                } else if(do_skip) {
+                    const std::uint64_t sid=cur.session_id;
+                    const bool up=cur.upload;
+                    pending_conflicts.pop_front();
+                    if(conflict_apply_all) pending_conflicts.clear();
+                    set_session_transfer_feedback(sid,up,"已跳过同名冲突文件");
+                    if(pending_conflicts.empty()) {
+                        conflict_batch_total=0;conflict_apply_all=false;ImGui::CloseCurrentPopup();dialog_followup=true;
+                    } else {
+                        prepare_front_conflict(m);
+                    }
+                }
+            }
+            ImGui::EndPopup();
+        }
         ImGui::PopStyleVar(5);
-    }
-    static std::string file_size(std::uint64_t value) {
-        if(value<1024)return std::to_string(value)+" B";
-        double size=static_cast<double>(value);
-        const char* units[]={"B","KiB","MiB","GiB","TiB","PiB","EiB"};
-        int unit=0;
-        while(size>=1024&&unit<6){size/=1024;++unit;}
-        char text[48];std::snprintf(text,sizeof(text),"%.1f %s",size,units[unit]);return text;
-    }
-    static std::string file_time(std::int64_t value) {
-        if(!value)return "—";
-        const auto t=static_cast<std::time_t>(value);
-        char out[32];const auto* tm=std::localtime(&t);
-        return tm&&std::strftime(out,sizeof(out),"%Y-%m-%d %H:%M",tm)?out:"—";
-    }
-    static std::string fold_ascii(std::string text) {
-        for(char& c:text)if(c>='A'&&c<='Z')c+=('a'-'A');
-        return text;
-    }
-    static std::string show_filename(std::string text) {
-        for(char& c:text)if(static_cast<unsigned char>(c)<32||c==127)c='?';
-        return text;
     }
     void file_action(std::uint64_t id,const app::FilePane& p,app::FileOperation kind,const app::FileEntry* entry=nullptr) {
         operation_parent=p.path;
@@ -1596,11 +2018,12 @@ struct Workspace::Impl {
         ImGui::PopID();
     }
     void file_browser_pane(const app::SessionView& s,bool remote,BrowserPane& b,const app::FilePane* pane,
-                           const app::FilePane* other,float width,float height,const app::WorkspaceCallbacks& cb) {
+                           const app::FilePane* other,float width,float height,const app::WorkspaceModel& m,
+                           const app::WorkspaceCallbacks& cb) {
         const bool allowed=!remote||s.connected;
         const bool busy=pane&&pane->loading;
         const bool ready=pane&&!pane->path.empty()&&!busy&&allowed;
-        const bool can_transfer=ready&&s.connected&&cb.file_transfer&&other&&!other->path.empty()&&!other->loading;
+        const bool can_transfer=ready&&s.connected&&(cb.file_transfer_ex||cb.file_transfer)&&other&&!other->path.empty()&&!other->loading;
         if(pane&&b.revision!=pane->revision){
             b.revision=pane->revision;b.rebuild=true;
             if(b.listed_path!=pane->path){b.selection.clear();b.anchor.clear();b.reset_scroll=true;}
@@ -1610,9 +2033,6 @@ struct Workspace::Impl {
         std::optional<std::string> navigation;
         const std::string up=pane?app::file_parent(pane->path,remote):"";
         auto eligible=[&](const app::FileEntry& e){return e.regular&&app::valid_file_leaf(e.name,app::windows_file_path(!remote));};
-        auto transfer=[&](const app::FileEntry& e){
-            return cb.file_transfer(s.id,!remote,app::file_child(pane->path,e.name,remote),app::file_child(other->path,e.name,!remote));
-        };
         ImGui::PushID(remote?1:0);
         const ImVec2 pane_origin=ImGui::GetCursorScreenPos();
         draw_glass_panel(ImGui::GetWindowDrawList(),pane_origin,ImVec2(pane_origin.x+width,pane_origin.y+height),
@@ -1688,10 +2108,9 @@ struct Workspace::Impl {
         constexpr float act_h=28.f;
         ImGui::BeginDisabled(!can_transfer||!selected_files);
         if(button((send+"###传输").c_str(),ImVec2(0,act_h),remote?"远端传输":"本地传输",ButtonKind::Primary)){
-            int added=0;
-            for(int i:b.rows){const auto& e=pane->entries[i];if(b.selection.count(e.name)&&eligible(e)&&transfer(e))++added;}
-            b.transfer_feedback="已入队 "+std::to_string(added)+" / "+std::to_string(selected_files)+" 个文件";
-            if(added<selected_files)b.transfer_feedback+="（重复任务或队列已满）";
+            std::vector<std::string> names;
+            for(int i:b.rows){const auto& e=pane->entries[i];if(b.selection.count(e.name)&&eligible(e))names.push_back(e.name);}
+            request_transfers(s.id,!remote,pane->path,other->path,names,b,m,cb);
         }
         ImGui::EndDisabled();ImGui::SameLine(0,6.f);
         ImGui::BeginDisabled(!ready||!cb.file_operation);
@@ -1839,12 +2258,12 @@ struct Workspace::Impl {
                     }
                     if(ready&&s.connected&&ImGui::GetDragDropPayload()){
                         const auto target=e.directory?app::file_child(pane->path,e.name,remote):pane->path;
-                        file_drop_target(s.id,remote,target,b,cb);
+                        file_drop_target(s.id,remote,target,b,m,cb);
                     }
                     if(ready&&begin_glass_context_menu()){
                         if(e.directory&&glass_menu_item("打开目录",nullptr,cb.file_list!=nullptr))navigation=app::file_child(pane->path,e.name,remote);
                         if(glass_menu_item(remote?"下载此文件":"上传此文件",nullptr,can_transfer&&eligible(e)))
-                            b.transfer_feedback=transfer(e)?"已加入传输队列":"未加入队列：可能已在队列中或队列已满";
+                            request_transfers(s.id,!remote,pane->path,other->path,{e.name},b,m,cb);
                         if(glass_menu_item("复制完整路径"))ImGui::SetClipboardText(app::file_child(pane->path,e.name,remote).c_str());
                         if(glass_menu_item("重命名",nullptr,cb.file_operation!=nullptr))file_action(s.id,*pane,app::FileOperation::Rename,&e);
                         if(glass_menu_item("权限",nullptr,cb.file_operation&&(e.regular||e.directory)&&!app::windows_file_path(remote)))file_action(s.id,*pane,app::FileOperation::Chmod,&e);
@@ -1857,7 +2276,7 @@ struct Workspace::Impl {
                     ImGui::PopID();
                 }
                 ImGui::PopStyleColor(3);ImGui::EndTable();
-                if(ready&&s.connected)file_drop_target(s.id,remote,pane->path,b,cb);
+                if(ready&&s.connected)file_drop_target(s.id,remote,pane->path,b,m,cb);
             }
             ImGui::PopStyleVar();
             ImGui::PopStyleColor(3);
@@ -1887,7 +2306,7 @@ struct Workspace::Impl {
         ImGui::PushID(scope.c_str());
         for(int i=0;i<2;++i){
             if(i&&!stacked)ImGui::SameLine(0,layout.column_gap);
-            file_browser_pane(s,i==1,browser.panes[i],panes[i],panes[1-i],width,height,cb);
+            file_browser_pane(s,i==1,browser.panes[i],panes[i],panes[1-i],width,height,m,cb);
         }
         int active=0,done=0;
         for(const auto& t:m.transfers)if(t.session_id==s.id){if(app::transfer_active(t.state))++active;else ++done;}
@@ -1904,8 +2323,8 @@ struct Workspace::Impl {
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha,q_alpha*page_alpha);
             ImGui::PushStyleColor(ImGuiCol_ChildBg,IM_COL32(0,0,0,0));
             ImGui::BeginChild("传输队列",ImVec2(0,queue_height),ImGuiChildFlags_AlwaysUseWindowPadding);
-            if(!active&&!done)ImGui::TextWrapped("拖拽普通文件到另一栏，或选择文件后点击上传 / 下载。Ctrl / Shift 可多选，右键打开文件菜单；同名目标不会被覆盖。");
-            std::uint64_t cancel_id=0, toggle_id=0;
+            if(!active&&!done)ImGui::TextWrapped("拖拽普通文件到另一栏，或选择文件后点击上传 / 下载。Ctrl / Shift 可多选，右键打开文件菜单；遇到同名文件将询问覆盖或另存为。");
+            std::uint64_t cancel_id=0, toggle_id=0, resolve_id=0;
             bool request_pause=false;
             auto task_row=[&](const app::TransferTask& t){
                 const bool finished=!app::transfer_active(t.state);
@@ -1919,25 +2338,27 @@ struct Workspace::Impl {
                     case State::Paused: status="已暂停";break;
                     case State::Resuming: status="正在恢复";break;
                     case State::Completed: status="已完成";break;
-                    case State::Failed: status="失败";break;
+                    case State::Failed: status=t.conflict?"同名冲突":"失败";break;
                     case State::Cancelled: status="已取消";break;
                 }
                 if(t.cancel_requested&&!finished)status="正在取消";
-                const ImU32 tint=t.state==State::Failed?theme.danger:t.state==State::Paused?theme.warning:
+                const ImU32 tint=t.state==State::Failed?(t.conflict?theme.warning:theme.danger):t.state==State::Paused?theme.warning:
                     t.state==State::Completed?theme.success:theme.dark?theme.accent_hover:theme.accent;
-                const auto filename=t.source.substr(t.source.find_last_of(t.upload&&app::windows_file_path(false)?"/\\":"/")+1);
+                const auto filename=file_leaf(t.source,!t.upload);
                 const std::string title=std::string(t.upload?"上传 · ":"下载 · ")+show_filename(filename);
                 const bool has_bytes=t.total_bytes||t.state==app::TransferState::Completed;
                 const std::string bytes=has_bytes?(file_size(t.completed_bytes)+" / "+file_size(t.total_bytes)):"";
                 const bool can_pause=!finished&&cb.file_set_paused!=nullptr;
                 const bool can_cancel=!finished&&cb.file_cancel!=nullptr;
+                const bool can_resolve=finished&&t.state==State::Failed&&t.conflict&&s.connected&&(cb.file_transfer_ex||cb.file_transfer);
                 const bool resume=t.state==State::Paused||t.state==State::Resuming;
                 const char* action=resume?"恢复":"暂停";
                 constexpr float gap=8.f;
                 // Match small_button's 10px horizontal padding on both sides.
                 const float pause_w=can_pause?ImGui::CalcTextSize(action).x+20.f:0.f;
                 const float cancel_w=can_cancel?ImGui::CalcTextSize("取消").x+20.f:0.f;
-                const float actions_w=pause_w+cancel_w+(can_pause&&can_cancel?gap:0.f);
+                const float resolve_w=can_resolve?ImGui::CalcTextSize("处理冲突").x+20.f:0.f;
+                const float actions_w=can_resolve?resolve_w:(pause_w+cancel_w+(can_pause&&can_cancel?gap:0.f));
                 const float bytes_w=has_bytes?ImGui::CalcTextSize(bytes.c_str()).x:0.f;
                 const float meta_w=actions_w+bytes_w+(actions_w&&has_bytes?gap:0.f);
                 const float row_w=ImGui::GetContentRegionAvail().x;
@@ -1961,6 +2382,10 @@ struct Workspace::Impl {
                     if(small_button("取消",hover_id.c_str()))cancel_id=t.id;
                     ImGui::EndDisabled();
                 }
+                if(can_resolve){
+                    const auto hover_id="处理冲突"+std::to_string(t.id);
+                    if(small_button("处理冲突",hover_id.c_str()))resolve_id=t.id;
+                }
                 if(has_bytes){
                     if(actions_w&&row_w>=meta_w)ImGui::SameLine(0,gap);
                     label(bytes);
@@ -1976,6 +2401,13 @@ struct Workspace::Impl {
             ImGui::EndChild();ImGui::PopStyleColor();ImGui::PopStyleVar();
             if(toggle_id)cb.file_set_paused(toggle_id,request_pause);
             if(cancel_id)cb.file_cancel(cancel_id);
+            if(resolve_id){
+                for(const auto& t:m.transfers)if(t.id==resolve_id){
+                    prompted_conflict_transfers.insert(t.id);
+                    enqueue_conflict(conflict_from_task(t,m),m);
+                    break;
+                }
+            }
         }
         if(clear)cb.file_clear_completed(s.id);
         ImGui::PopID();
@@ -2214,7 +2646,7 @@ bool Workspace::animation_active()const noexcept {
     return v.entrance.active()||v.selection.active()||v.hover.active()||v.modal.active()||
            v.theme_fade.active()||v.notice_fade.active()||v.hover_anim.active()||v.toggle_anim.active()||
            v.pill_anim.active()||v.scroll_anim.active()||
-           v.page.active()||v.loading_visible||v.dialog_followup||static_cast<bool>(v.key_task);
+           v.page.active()||v.loading_visible||v.dialog_followup||v.conflict_pending||static_cast<bool>(v.key_task);
 }
 Rgba Workspace::background_color()const noexcept {
     const auto c=ImGui::ColorConvertU32ToFloat4(impl_->theme.window_bg);
@@ -2289,6 +2721,8 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     }
     v.loading_visible=false;
     std::erase_if(v.browsers,[&](const auto& item){return std::none_of(m.sessions.begin(),m.sessions.end(),[&](const auto& session){return session.id==item.first;});});
+    v.watch_transfer_conflicts(m);
+    if(v.conflict_pending){v.block_terminal_input=true;v.terminal_focus=false;v.restore_terminal_focus=false;}
     if(fonts.regular)ImGui::PushFont(fonts.regular);
     const bool session_layout=active!=nullptr;
     const float item_spacing=session_layout?layout.session_spacing:layout.item_spacing;
@@ -2850,6 +3284,8 @@ void Workspace::draw(const app::WorkspaceModel& m,const app::WorkspaceCallbacks&
     // a facade is allowed to publish/reallocate the session list immediately.
     if(retry_source){
         v.browsers.erase(retry_source);
+        std::erase_if(v.pending_conflicts,[&](const auto& c){return c.session_id==retry_source;});
+        if(v.pending_conflicts.empty()){v.conflict_batch_total=0;v.conflict_apply_all=false;v.conflict_pending=false;}
         if(v.paste_session==retry_source){v.clear_paste();v.paste_pending=false;}
         v.resized_session=0;v.selection_session=0;v.terminal_mouse_buttons=0;
         v.terminal_focus=v.restore_terminal_focus=false;

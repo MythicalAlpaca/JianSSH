@@ -90,6 +90,7 @@ struct Layout {
     float modal_width_paste = 540.f;
     float modal_width_trust = 500.f;
     float modal_width_operation = 420.f;
+    float modal_width_conflict = 468.f;
     float confirm_min_width = 270.f;
     float confirm_viewport_margin = 12.f;
     float confirm_padding = 18.f;
